@@ -160,6 +160,29 @@ Scripts:
 - `decode-frames.js` — reproduces the client framing and decodes `FOOTPRINT/V2`
   bodies with `footprint.proto`, verifying `max.buy/sell.volume`.
 - `analyze-ws.js`, `extract.js` — helpers for summarizing frames / grepping bundles.
+- `poc-log-maxvol.js` — live POC: request `5m` / `10m` / `15m` `FOOTPRINT/V2`
+  every 30s and append Max Vol B/S of the latest candle to
+  `evidence/maxvol-poc.csv`. Set `HEADLESS=1` to run without Xvfb.
+
+Full clone-to-deploy steps: [`INSTRUCTIONS.md`](../INSTRUCTIONS.md).
+
+## Live POC result (2026-08-13)
+
+Ran `poc-log-maxvol.js` against `MCX:FUTURE:CRUDEOIL-I` for 5 minutes
+(11 samples × 3 intervals = 33 rows). Every row decoded, and server
+`max.buy.volume` / `max.sell.volume` matched the recomputed per-level max.
+
+CSV: [`evidence/maxvol-poc.csv`](evidence/maxvol-poc.csv). Snapshot of live
+updates around the 20:45 IST 5m/15m candle rollover:
+
+| sample (IST) | 5m MaxVol B/S (candle) | 10m MaxVol B/S (candle) | 15m MaxVol B/S (candle) |
+| --- | --- | --- | --- |
+| 20:44:45 | 74 / 61 (20:40) | 74 / 61 (20:40) | 85 / 177 (20:30) |
+| 20:45:15 | 25 / 10 (20:45) | 74 / 61 (20:40) | 25 / 10 (20:45) |
+| 20:46:15 | 169 / 13 (20:45) | 169 / 61 (20:40) | 169 / 13 (20:45) |
+
+The forming 5m/15m candles reset at 20:45; the 10m candle (20:40–20:50) kept
+accumulating. Totals and price-level counts also increased between samples.
 
 ## Notes & caveats
 
