@@ -23,3 +23,18 @@ This was confirmed by decoding real captured frames with the site's own
 `footprint.proto`; the server values match the recomputed per-level maxima exactly.
 See [`investigation/FINDINGS.md`](investigation/FINDINGS.md) for the protocol,
 schema, and proof.
+
+## Live proof-of-concept (CSV sampler)
+
+`investigation/poc-log-maxvol.js` logs in to the saved chart, opens the
+market-data WebSocket, and writes **Max Vol B / Max Vol S** for the latest
+`5m`, `10m`, and `15m` footprint candles to CSV every 30 seconds (default 5
+minute run). It does not click chart/timeframe buttons — those intervals are
+requested as `FOOTPRINT/V2` commands.
+
+```bash
+cd investigation
+npm install
+PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
+# CSV -> investigation/evidence/maxvol-poc.csv
+```

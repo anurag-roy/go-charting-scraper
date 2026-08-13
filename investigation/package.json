@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "poc": "node poc-log-maxvol.js"
   },
   "keywords": [],
   "author": "",
@@ -13,6 +13,7 @@
   "dependencies": {
     "pako": "^3.0.1",
     "playwright": "^1.62.1",
-    "protobufjs": "^8.7.2"
+    "protobufjs": "^8.7.2",
+    "ws": "^8.18.3"
   }
 }

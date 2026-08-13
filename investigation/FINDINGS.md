@@ -160,6 +160,9 @@ Scripts:
 - `decode-frames.js` — reproduces the client framing and decodes `FOOTPRINT/V2`
   bodies with `footprint.proto`, verifying `max.buy/sell.volume`.
 - `analyze-ws.js`, `extract.js` — helpers for summarizing frames / grepping bundles.
+- `poc-log-maxvol.js` — live POC: request `5m` / `10m` / `15m` `FOOTPRINT/V2`
+  every 30s for 5 minutes and append Max Vol B/S of the latest candle to
+  `evidence/maxvol-poc.csv`. Does not click chart buttons.
 
 ## Notes & caveats
 
