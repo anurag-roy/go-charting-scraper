@@ -4,7 +4,11 @@ Reverse-engineering how [gocharting.com](https://gocharting.com) sources and
 computes its footprint/order-flow data — specifically the **"Max Vol B"** and
 **"Max Vol S"** values shown on the terminal.
 
-- Full write-up: [`investigation/FINDINGS.md`](investigation/FINDINGS.md)
+**To clone, install, and start scraping:** see
+[`INSTRUCTIONS.md`](INSTRUCTIONS.md) (prerequisites, headless Linux, env vars,
+CSV schema, systemd/cron, Docker, troubleshooting).
+
+- Protocol write-up: [`investigation/FINDINGS.md`](investigation/FINDINGS.md)
 - Capture & decode tooling: [`investigation/`](investigation/)
 
 ## Short answer

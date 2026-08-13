@@ -161,9 +161,10 @@ Scripts:
   bodies with `footprint.proto`, verifying `max.buy/sell.volume`.
 - `analyze-ws.js`, `extract.js` — helpers for summarizing frames / grepping bundles.
 - `poc-log-maxvol.js` — live POC: request `5m` / `10m` / `15m` `FOOTPRINT/V2`
-  every 30s for 5 minutes and append Max Vol B/S of the latest candle to
-  `evidence/maxvol-poc.csv`. Does not click chart buttons. Set `HEADLESS=1` to
-  run without Xvfb (verified on Linux with system Chrome and Playwright Chromium).
+  every 30s and append Max Vol B/S of the latest candle to
+  `evidence/maxvol-poc.csv`. Set `HEADLESS=1` to run without Xvfb.
+
+Full clone-to-deploy steps: [`INSTRUCTIONS.md`](../INSTRUCTIONS.md).
 
 ## Live POC result (2026-08-13)
 
