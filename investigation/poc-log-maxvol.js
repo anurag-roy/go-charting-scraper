@@ -33,6 +33,7 @@ const SESSION = 'RTH';
 
 const RUN_MS = Number(process.env.RUN_MS || 300_000);
 const SAMPLE_MS = Number(process.env.SAMPLE_MS || 30_000);
+const LAST_N = Number(process.env.LAST_N || 0);
 const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'evidence', 'maxvol-poc.csv');
 const OUT_DIR = process.env.OUT_DIR || path.join(__dirname, 'out', 'poc');
 
@@ -138,6 +139,13 @@ function latestCandle(candles) {
     if (!best) return c;
     return String(c.date || '') > String(best.date || '') ? c : best;
   }, null);
+}
+
+function lastNCandles(candles, n) {
+  if (!candles?.length) return [];
+  return [...candles]
+    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')))
+    .slice(-n);
 }
 
 class FootprintClient {
@@ -492,6 +500,16 @@ async function main() {
       const results = await Promise.all(INTERVALS.map((iv) => client.requestInterval(iv, dates)));
       for (const [i, res] of results.entries()) {
         const interval = INTERVALS[i];
+        if (LAST_N > 0) {
+          const slice = lastNCandles(res.candles, LAST_N);
+          console.log(`  ${interval} last ${slice.length}/${res.candles?.length || 0}:`);
+          for (const c of slice) {
+            const s = summarizeCandle(c);
+            console.log(
+              `    ${s.candle_time}  MaxVolB=${s.max_vol_b} MaxVolS=${s.max_vol_s} totals=${s.totals_buy}/${s.totals_sell} levels=${s.price_levels} match=${s.values_match}`,
+            );
+          }
+        }
         const candle = latestCandle(res.candles);
         const stats = candle ? summarizeCandle(candle) : {};
         const row = {
