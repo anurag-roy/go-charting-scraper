@@ -35,6 +35,9 @@ requested as `FOOTPRINT/V2` commands.
 ```bash
 cd investigation
 npm install
+# Headless (works on a Linux server with no display / no Xvfb):
+HEADLESS=1 node poc-log-maxvol.js
+# Or headed Chrome under Xvfb:
 PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
 # CSV -> investigation/evidence/maxvol-poc.csv
 ```

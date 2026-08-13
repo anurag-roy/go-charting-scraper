@@ -11,10 +11,13 @@
 // Usage:
 //   cd investigation && npm install
 //   PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
+//   HEADLESS=1 node poc-log-maxvol.js
 //
 // Optional env:
 //   RUN_MS      total sampling window (default 300000 = 5 minutes)
 //   SAMPLE_MS   period between samples (default 30000)
+//   LAST_N      if set, also print the last N candles per interval
+//   HEADLESS    1/true to launch Chromium/Chrome without a display
 //   CSV_PATH    output CSV (default investigation/evidence/maxvol-poc.csv)
 import { chromium } from 'playwright';
 import WebSocket from 'ws';
@@ -34,6 +37,7 @@ const SESSION = 'RTH';
 const RUN_MS = Number(process.env.RUN_MS || 300_000);
 const SAMPLE_MS = Number(process.env.SAMPLE_MS || 30_000);
 const LAST_N = Number(process.env.LAST_N || 0);
+const HEADLESS = /^(1|true|yes)$/i.test(String(process.env.HEADLESS || ''));
 const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'evidence', 'maxvol-poc.csv');
 const OUT_DIR = process.env.OUT_DIR || path.join(__dirname, 'out', 'poc');
 
@@ -459,8 +463,9 @@ async function main() {
   const root = await protobuf.load(protoPath);
   const FP = root.lookupType('fpgc.FootPrintForDateResponse');
 
-  const launchOpts = { headless: false, args: ['--no-sandbox', '--disable-dev-shm-usage'] };
+  const launchOpts = { headless: HEADLESS, args: ['--no-sandbox', '--disable-dev-shm-usage'] };
   if (process.env.PW_CHANNEL) launchOpts.channel = process.env.PW_CHANNEL;
+  console.log('browser launch', { headless: HEADLESS, channel: process.env.PW_CHANNEL || 'playwright-chromium' });
 
   const browser = await chromium.launch(launchOpts);
   const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
