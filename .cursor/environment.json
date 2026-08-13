@@ -1,0 +1,17 @@
+{
+  "name": "go-charting-scraper",
+  "install": "go mod download && go build -o bin/scraper .",
+  "terminals": [
+    {
+      "name": "scraper-server",
+      "command": "go run . --addr :8080",
+      "description": "HTTP dashboard that scrapes CoinGecko and renders a live price chart on http://localhost:8080"
+    }
+  ],
+  "ports": [
+    {
+      "name": "scraper-server",
+      "port": 8080
+    }
+  ]
+}
