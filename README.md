@@ -5,8 +5,8 @@ computes its footprint/order-flow data — specifically the **"Max Vol B"** and
 **"Max Vol S"** values shown on the terminal.
 
 **To clone, install, and start scraping:** see
-[`INSTRUCTIONS.md`](INSTRUCTIONS.md) (prerequisites, headless Linux, env vars,
-CSV schema, systemd/cron, Docker, troubleshooting).
+[`INSTRUCTIONS.md`](INSTRUCTIONS.md) (prerequisites, env vars, CSV schema,
+systemd/cron, Docker, troubleshooting). No browser required.
 
 - Protocol write-up: [`investigation/FINDINGS.md`](investigation/FINDINGS.md)
 - Capture & decode tooling: [`investigation/`](investigation/)
@@ -30,19 +30,16 @@ schema, and proof.
 
 ## Live proof-of-concept (CSV sampler)
 
-`investigation/poc-log-maxvol.js` logs in to the saved chart, opens the
+`investigation/poc-log-maxvol.js` authenticates with AWS Cognito over HTTPS
+(same `USER_PASSWORD_AUTH` flow as the website — **no browser**), opens the
 market-data WebSocket, and writes **Max Vol B / Max Vol S** for the latest
 `5m`, `10m`, and `15m` footprint candles to CSV every 30 seconds (default 5
-minute run). It does not click chart/timeframe buttons — those intervals are
-requested as `FOOTPRINT/V2` commands.
+minute run). Intervals are requested as `FOOTPRINT/V2` commands.
 
 ```bash
 cd investigation
 npm install
-# Headless (works on a Linux server with no display / no Xvfb):
-HEADLESS=1 node poc-log-maxvol.js
-# Or headed Chrome under Xvfb:
-PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
+RUN_MS=0 node poc-log-maxvol.js
 # CSV -> investigation/evidence/maxvol-poc.csv
 ```
 

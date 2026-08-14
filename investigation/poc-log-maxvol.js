@@ -1,25 +1,23 @@
-// Proof-of-concept: log Max Vol B / Max Vol S every 30s for 5m / 10m / 15m
+// Live sampler: log Max Vol B / Max Vol S every 30s for 5m / 10m / 15m
 // footprint candles, using the FOOTPRINT/V2 WebSocket protocol documented in
 // FINDINGS.md.
 //
-// Visits the saved chart URL and logs in (required). Does NOT change profile
-// settings or click terminal/chart buttons (no timeframe clicks) — the three
-// intervals are requested directly over the market-data WebSocket.
+// Auth is AWS Cognito USER_PASSWORD_AUTH (same public client id the website
+// uses). No browser is required. Intervals are requested directly over the
+// market-data WebSocket — the saved chart is not opened.
 //
 // Credentials: GOCHARTING_EMAIL / GOCHARTING_PASSWORD (env only, never written).
 //
 // Usage:
 //   cd investigation && npm install
-//   PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
-//   HEADLESS=1 node poc-log-maxvol.js
+//   RUN_MS=0 node poc-log-maxvol.js
 //
 // Optional env:
 //   RUN_MS      total sampling window (default 300000 = 5 minutes)
 //   SAMPLE_MS   period between samples (default 30000)
 //   LAST_N      if set, also print the last N candles per interval
-//   HEADLESS    1/true to launch Chromium/Chrome without a display
 //   CSV_PATH    output CSV (default investigation/evidence/maxvol-poc.csv)
-import { chromium } from 'playwright';
+//   WS_DC       market-data datacenter (default blr1; nyc1 also exists)
 import WebSocket from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,16 +26,24 @@ import protobuf from 'protobufjs';
 import * as pako from 'pako';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CHART_URL = 'https://gocharting.com/terminal/chart/kd5OXEIXs';
-const DEFAULT_WS_HOST = 'wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws';
+
+// Public Amplify/Cognito config from the GoCharting web client
+// (app bundle Auth.userPoolId / userPoolWebClientId / authenticationFlowType).
+const COGNITO_REGION = 'ap-south-1';
+const COGNITO_CLIENT_ID = '3fqhvm22ea8pjsr2spbnv484pr';
+const COGNITO_ENDPOINT = `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`;
+const COGNITO_CLIENT_METADATA = { myCustomKey: 'myCustomValue' };
+
+const WS_DC = process.env.WS_DC || 'blr1';
+const DEFAULT_WS_HOST = `wss://origin.ws.prodb.${WS_DC}.gocharting.com/${WS_DC}/ws`;
 const SYMBOL = { exchange: 'MCX', segment: 'FUTURE', symbol: 'CRUDEOIL-I' };
 const INTERVALS = ['5m', '10m', '15m'];
 const SESSION = 'RTH';
+const DEVICE_TAG = process.env.WS_TAG || 'go-charting-scraper';
 
 const RUN_MS = Number(process.env.RUN_MS || 300_000);
 const SAMPLE_MS = Number(process.env.SAMPLE_MS || 30_000);
 const LAST_N = Number(process.env.LAST_N || 0);
-const HEADLESS = /^(1|true|yes)$/i.test(String(process.env.HEADLESS || ''));
 const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'evidence', 'maxvol-poc.csv');
 const OUT_DIR = process.env.OUT_DIR || path.join(__dirname, 'out', 'poc');
 
@@ -152,20 +158,85 @@ function lastNCandles(candles, n) {
     .slice(-n);
 }
 
+function jwtExpMs(token) {
+  try {
+    const payload = token.split('.')[1];
+    const json = Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const exp = JSON.parse(json).exp;
+    return Number(exp) * 1000;
+  } catch {
+    return 0;
+  }
+}
+
+async function cognitoInitiateAuth({ username, password: pw, refreshToken }) {
+  const body = refreshToken
+    ? {
+      AuthFlow: 'REFRESH_TOKEN_AUTH',
+      ClientId: COGNITO_CLIENT_ID,
+      AuthParameters: { REFRESH_TOKEN: refreshToken },
+      ClientMetadata: COGNITO_CLIENT_METADATA,
+    }
+    : {
+      AuthFlow: 'USER_PASSWORD_AUTH',
+      ClientId: COGNITO_CLIENT_ID,
+      AuthParameters: { USERNAME: username, PASSWORD: pw },
+      ClientMetadata: COGNITO_CLIENT_METADATA,
+    };
+  const res = await fetch(COGNITO_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-amz-json-1.1',
+      'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth',
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch {
+    throw new Error(`cognito non-json ${res.status}`);
+  }
+  if (!res.ok || data.__type || data.message) {
+    const msg = data.message || data.__type || `HTTP ${res.status}`;
+    throw new Error(`cognito auth failed: ${msg}`);
+  }
+  if (data.ChallengeName) {
+    throw new Error(`cognito extra challenge: ${data.ChallengeName}`);
+  }
+  const ar = data.AuthenticationResult || {};
+  if (!ar.IdToken) throw new Error('cognito auth failed: no IdToken');
+  return {
+    idToken: ar.IdToken,
+    accessToken: ar.AccessToken || '',
+    refreshToken: ar.RefreshToken || refreshToken || '',
+    expiresIn: Number(ar.ExpiresIn || 0),
+    expMs: jwtExpMs(ar.IdToken),
+  };
+}
+
+function buildWsUrl(idToken) {
+  return `${DEFAULT_WS_HOST}?token=${encodeURIComponent(idToken)}&tag=${encodeURIComponent(DEVICE_TAG)}`;
+}
+
 class FootprintClient {
-  constructor(wsUrl, FP) {
-    this.wsUrl = wsUrl;
+  constructor(FP) {
     this.FP = FP;
+    this.wsUrl = '';
     this.ws = null;
     this.nextId = 9000;
     this.pending = new Map(); // requestId -> { interval, candles, extra, resolve, timer, quiet }
     this.nativeIntervals = new Set();
   }
 
-  connect() {
+  connect(wsUrl) {
+    if (wsUrl) this.wsUrl = wsUrl;
     try { this.ws?.close(); } catch {}
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.wsUrl, {
+        origin: 'https://gocharting.com',
+        perMessageDeflate: false,
+        handshakeTimeout: 20_000,
         headers: {
           Origin: 'https://gocharting.com',
           'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
@@ -180,9 +251,19 @@ class FootprintClient {
         dbg({ ev: 'poc-ws-open' });
         resolve();
       });
+      ws.on('unexpected-response', (req, res) => {
+        dbg({ ev: 'poc-ws-unexpected', status: res.statusCode });
+        if (!opened) {
+          clearTimeout(t);
+          reject(new Error(`ws unexpected HTTP ${res.statusCode}`));
+        }
+      });
       ws.on('error', (err) => {
         dbg({ ev: 'poc-ws-error', err: String(err.message || err) });
-        if (!opened) reject(err);
+        if (!opened) {
+          clearTimeout(t);
+          reject(err);
+        }
       });
       ws.on('close', (code, reason) => {
         dbg({ ev: 'poc-ws-close', code, reason: redact(String(reason || '')) });
@@ -334,96 +415,6 @@ class FootprintClient {
   }
 }
 
-async function loginAndGetWsUrl(page, context) {
-  let wsUrl = '';
-  const seen = new Set();
-
-  const noteUrl = (u) => {
-    if (!u || seen.has(u)) return;
-    seen.add(u);
-    dbg({ ev: 'ws-seen', url: redact(u) });
-    if (/\/ws(\?|$)/.test(u) && u.includes('token=')) wsUrl = u;
-    else if (/gocharting\.com.*\/ws/.test(u) && !wsUrl) wsUrl = u;
-  };
-
-  page.on('websocket', (ws) => {
-    noteUrl(ws.url());
-    ws.on('framesent', (d) => {
-      const s = typeof d.payload === 'string' ? d.payload : '';
-      if (s && /FOOTPRINT|command/i.test(s)) dbg({ ev: 'native-sent', data: redact(s).slice(0, 1500) });
-    });
-  });
-
-  try {
-    const cdp = await context.newCDPSession(page);
-    await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
-    await cdp.send('Network.enable');
-    cdp.on('Network.webSocketCreated', (p) => noteUrl(p.url));
-    cdp.on('Target.attachedToTarget', async (ev) => {
-      try {
-        const session = ev.sessionId
-          ? await context.newCDPSession(page).catch(() => null)
-          : null;
-        void session;
-      } catch {}
-    });
-  } catch (e) {
-    dbg({ ev: 'cdp-err', err: e.message });
-  }
-
-  console.log('goto', CHART_URL);
-  await page.goto(CHART_URL, { waitUntil: 'domcontentloaded', timeout: 90_000 });
-  await page.waitForTimeout(5000);
-
-  const dismiss = page.locator('button', { hasText: /^Dismiss$/ });
-  if (await dismiss.count()) {
-    await dismiss.first().click().catch(() => {});
-    await page.waitForTimeout(800);
-  }
-
-  console.log('login');
-  await page.locator('#login-avatar').click({ timeout: 15_000 });
-  await page.waitForSelector('#email_field', { timeout: 20_000 });
-  await page.fill('#email_field', email);
-  await page.fill('#password_field', password);
-  await page.locator('button[type=submit]', { hasText: /Sign In/i }).click();
-  await page.waitForTimeout(8000);
-
-  const stillLogin = await page.locator('#email_field').count();
-  console.log('loginModalGone=', stillLogin === 0, 'url=', page.url());
-  if (stillLogin > 0) {
-    await page.screenshot({ path: path.join(OUT_DIR, 'login-failed.png') }).catch(() => {});
-    throw new Error('login modal still present');
-  }
-  await page.screenshot({ path: path.join(OUT_DIR, 'after-login.png') }).catch(() => {});
-
-  // Wait for the market-data WS (token in query string).
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline && !String(wsUrl).includes('token=')) {
-    await page.waitForTimeout(500);
-  }
-
-  // Fallback: Cognito id token in localStorage.
-  if (!String(wsUrl).includes('token=')) {
-    const tok = await page.evaluate(() => {
-      const out = { idToken: '', keys: Object.keys(localStorage) };
-      for (const k of out.keys) {
-        if (/idToken$/i.test(k)) { out.idToken = localStorage.getItem(k) || ''; break; }
-      }
-      return out;
-    });
-    dbg({ ev: 'localStorage-keys', keys: tok.keys.filter((k) => /cognito|token|jwt/i.test(k)) });
-    if (tok.idToken) {
-      const host = wsUrl && wsUrl.startsWith('wss://') ? wsUrl.split('?')[0] : DEFAULT_WS_HOST;
-      wsUrl = `${host}?token=${tok.idToken}`;
-    }
-  }
-
-  if (!wsUrl) throw new Error('could not obtain market-data websocket URL / token');
-  dbg({ ev: 'ws-url-ready', url: redact(wsUrl) });
-  return wsUrl;
-}
-
 function writeHeader(stream) {
   stream.write([
     'sampled_at_utc',
@@ -463,23 +454,38 @@ async function main() {
   const root = await protobuf.load(protoPath);
   const FP = root.lookupType('fpgc.FootPrintForDateResponse');
 
-  const launchOpts = { headless: HEADLESS, args: ['--no-sandbox', '--disable-dev-shm-usage'] };
-  if (process.env.PW_CHANNEL) launchOpts.channel = process.env.PW_CHANNEL;
-  console.log('browser launch', { headless: HEADLESS, channel: process.env.PW_CHANNEL || 'playwright-chromium' });
+  console.log('cognito login (USER_PASSWORD_AUTH, no browser)');
+  let session = await cognitoInitiateAuth({ username: email, password });
+  dbg({ ev: 'cognito-ok', expiresIn: session.expiresIn, expMs: session.expMs });
+  console.log('cognito ok expiresIn=', session.expiresIn, 's');
 
-  const browser = await chromium.launch(launchOpts);
-  const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
-  const page = await context.newPage();
+  const client = new FootprintClient(FP);
+  const ensureWs = async (forceRefresh = false) => {
+    const remaining = session.expMs - Date.now();
+    const tokenStale = remaining < 5 * 60_000;
+    if (forceRefresh || tokenStale) {
+      console.log('refreshing cognito token');
+      try {
+        session = await cognitoInitiateAuth({ refreshToken: session.refreshToken });
+      } catch (e) {
+        dbg({ ev: 'refresh-fail', err: String(e.message || e) });
+        session = await cognitoInitiateAuth({ username: email, password });
+      }
+      dbg({ ev: 'cognito-refresh', expiresIn: session.expiresIn, expMs: session.expMs });
+    }
+    const closed = !client.ws || client.ws.readyState !== WebSocket.OPEN;
+    if (forceRefresh || tokenStale || closed) {
+      await client.connect(buildWsUrl(session.idToken));
+    }
+  };
 
-  let client;
   try {
-    const wsUrl = await loginAndGetWsUrl(page, context);
-    client = new FootprintClient(wsUrl, FP);
-    await client.connect();
+    await ensureWs();
 
     const dates = sessionDates();
     console.log('session dates (IST):', dates.join(', '));
     console.log(`sampling ${INTERVALS.join(', ')} every ${SAMPLE_MS / 1000}s for ${RUN_MS / 1000}s`);
+    console.log('ws', DEFAULT_WS_HOST);
     console.log('csv ->', CSV_PATH);
 
     const csv = fs.createWriteStream(CSV_PATH);
@@ -497,9 +503,11 @@ async function main() {
       const sampled_at_ist = istNow();
       console.log(`\n--- sample ${sampleN} @ ${sampled_at_utc} ---`);
 
-      if (client.ws.readyState !== WebSocket.OPEN) {
+      if (!client.ws || client.ws.readyState !== WebSocket.OPEN) {
         console.log('ws not open; reconnecting');
-        await client.connect();
+        await ensureWs(true);
+      } else {
+        await ensureWs(false);
       }
 
       const results = await Promise.all(INTERVALS.map((iv) => client.requestInterval(iv, dates)));
@@ -551,7 +559,6 @@ async function main() {
   } finally {
     try { client?.ws?.close(); } catch {}
     debugLog.end();
-    await browser.close().catch(() => {});
   }
 }
 

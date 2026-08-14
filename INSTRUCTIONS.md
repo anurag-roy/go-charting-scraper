@@ -20,20 +20,18 @@ Related reading (not required to start scraping):
 4. [Clone the repository](#4-clone-the-repository)
 5. [Install Node.js](#5-install-nodejs)
 6. [Install project dependencies](#6-install-project-dependencies)
-7. [Install a browser for Playwright](#7-install-a-browser-for-playwright)
-8. [Configure credentials](#8-configure-credentials)
-9. [First successful scrape](#9-first-successful-scrape)
-10. [Environment variables](#10-environment-variables)
-11. [CSV output](#11-csv-output)
-12. [Common recipes](#12-common-recipes)
-13. [Linux server / unattended deploy](#13-linux-server--unattended-deploy)
-14. [Docker](#14-docker)
-15. [Headed Chrome + Xvfb fallback](#15-headed-chrome--xvfb-fallback)
-16. [What the scraper does *not* do](#16-what-the-scraper-does-not-do)
-17. [Hardcoded target (chart / symbol / intervals)](#17-hardcoded-target-chart--symbol--intervals)
-18. [Troubleshooting](#18-troubleshooting)
-19. [Investigation / debug scripts](#19-investigation--debug-scripts)
-20. [Security, git, and ToS](#20-security-git-and-tos)
+7. [Configure credentials](#7-configure-credentials)
+8. [First successful scrape](#8-first-successful-scrape)
+9. [Environment variables](#9-environment-variables)
+10. [CSV output](#10-csv-output)
+11. [Common recipes](#11-common-recipes)
+12. [Linux server / unattended deploy](#12-linux-server--unattended-deploy)
+13. [Docker](#13-docker)
+14. [What the scraper does *not* do](#14-what-the-scraper-does-not-do)
+15. [Hardcoded target (symbol / intervals)](#15-hardcoded-target-symbol--intervals)
+16. [Troubleshooting](#16-troubleshooting)
+17. [Investigation / debug scripts](#17-investigation--debug-scripts)
+18. [Security, git, and ToS](#18-security-git-and-tos)
 
 ---
 
@@ -41,10 +39,9 @@ Related reading (not required to start scraping):
 
 The live scraper is `investigation/poc-log-maxvol.js`.
 
-It logs into the saved chart
-`https://gocharting.com/terminal/chart/kd5OXEIXs`, then every sample interval
-requests footprint data for **5m**, **10m**, and **15m** candles of
-`MCX:FUTURE:CRUDEOIL-I` and writes:
+It signs in to GoCharting with AWS Cognito over HTTPS (no browser), then every
+sample interval requests footprint data for **5m**, **10m**, and **15m** candles
+of `MCX:FUTURE:CRUDEOIL-I` and writes:
 
 | Field | Meaning |
 | --- | --- |
@@ -54,25 +51,23 @@ requests footprint data for **5m**, **10m**, and **15m** candles of
 Default behaviour: sample every **30 seconds** for **5 minutes** (11 samples ×
 3 intervals = 33 CSV rows), then exit.
 
-Verified on Linux:
-
-- Headless Playwright Chromium (**no display, no Xvfb**)
-- Headless system Google Chrome (`PW_CHANNEL=chrome`)
-- Headed Chrome under Xvfb (`xvfb-run -a`)
+Verified on Linux: Node 22, outbound HTTPS + WSS only (no Chromium, no Xvfb,
+no display).
 
 ---
 
 ## 2. How the scraper works
 
 You do **not** need to understand this to run it. It is here so the setup
-choices (browser, outbound hosts, secrets) make sense.
+choices (outbound hosts, secrets) make sense.
 
-1. Playwright opens the saved-chart URL and signs in with
-   `GOCHARTING_EMAIL` / `GOCHARTING_PASSWORD` (AWS Cognito).
-2. Cognito issues a JWT. The market-data WebSocket is
-   `wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws?token=<JWT>`.
-3. The Node process opens **its own** WebSocket (the browser is only needed
-   for login / token).
+1. `POST` AWS Cognito `InitiateAuth` (`USER_PASSWORD_AUTH`) with
+   `GOCHARTING_EMAIL` / `GOCHARTING_PASSWORD` using the same public web client
+   id the website ships (`3fqhvm22ea8pjsr2spbnv484pr`, pool
+   `ap-south-1_uuM8MRslb`).
+2. Cognito returns a JWT **id token**. The market-data WebSocket is
+   `wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws?token=<JWT>&tag=…`.
+3. The Node process opens that WebSocket (Origin `https://gocharting.com`).
 4. It sends JSON `FOOTPRINT/V2` commands for intervals `5m`, `10m`, `15m`.
 5. The server replies with **binary Protobuf** frames (sometimes
    deflate-compressed). The script decodes them with
@@ -83,12 +78,12 @@ choices (browser, outbound hosts, secrets) make sense.
    records `values_match=true` when they agree with the server.
 
 There is **no REST/JSON endpoint** for these numbers. Do not try to scrape
-them out of the DOM; the chart canvas does not expose them as text.
+them out of the DOM; the chart canvas does not expose them as text. A headless
+browser is also unnecessary: login is a single Cognito HTTP call.
 
-Cognito id tokens typically last about **one hour**. Each process currently
-logs in once at start, then re-requests footprint data for the whole run.
-A 5-minute default run is well inside that window. For a multi-hour sampler,
-restart the process (or re-login) at least hourly.
+Cognito id tokens from this client currently last **8 hours** (`ExpiresIn`
+28800). The scraper refreshes with `REFRESH_TOKEN_AUTH` (or re-logins) when
+less than five minutes remain, so a multi-hour sampler can stay in one process.
 
 ---
 
@@ -96,21 +91,19 @@ restart the process (or re-login) at least hourly.
 
 ### Account
 
-- A working [GoCharting](https://gocharting.com) login that can open
-  `https://gocharting.com/terminal/chart/kd5OXEIXs`.
-- That saved layout is a 3×3 of `MCX:FUTURE:CRUDEOIL-I` footprint charts.
-  If the chart id is deleted or made private, login will still work but
-  you should update `CHART_URL` in the script (see [§17](#17-hardcoded-target-chart--symbol--intervals)).
+- A working [GoCharting](https://gocharting.com) login that can access
+  `MCX:FUTURE:CRUDEOIL-I` footprint data (the same account that can open
+  `https://gocharting.com/terminal/chart/kd5OXEIXs`).
 
 ### Machine
 
 | Item | Recommendation |
 | --- | --- |
-| OS | Ubuntu 22.04 / 24.04 (Debian 12 is fine). macOS also works with headless Chromium. |
-| CPU / RAM | 1 vCPU is enough; **≥ 2 GB RAM** (Chrome is the heavy part). Add swap on a 1 GB VPS. |
-| Disk | ~500 MB for Node + Playwright Chromium; plus CSV growth. |
-| Display | **Not required** if you use `HEADLESS=1`. |
-| Privileges | A normal user is enough. `--no-sandbox` is already passed (needed in many containers / as root). |
+| OS | Ubuntu 22.04 / 24.04 (Debian 12 is fine). macOS / any Node 20+ host. |
+| CPU / RAM | Tiny: **~128–256 MB** is enough. No Chrome. |
+| Disk | ~50 MB for Node deps; plus CSV growth. |
+| Display | **Not required.** |
+| Privileges | A normal user is enough. |
 
 ### Network (outbound)
 
@@ -118,26 +111,23 @@ The host must reach at least:
 
 | Host | Why |
 | --- | --- |
-| `gocharting.com` (HTTPS) | Chart UI, login page, APIs, `footprint.proto` |
 | `cognito-idp.ap-south-1.amazonaws.com` (HTTPS) | Auth / JWT |
 | `origin.ws.prodb.blr1.gocharting.com` (WSS `443`) | Market data |
-| `cdn.playwright.dev` (HTTPS) | First-time Chromium download |
 
-If you use a firewall / egress allowlist, also allow typical CDNs used by
-the chart page (CloudFront / similar). A first run with `HEADLESS=1` will
-fail fast if login or the WebSocket is blocked.
+The investigation / capture scripts (not the live scraper) also need
+`gocharting.com` and `cdn.playwright.dev` if you re-run Playwright captures.
 
 ### Software you must have (or will install below)
 
 - `git`
 - **Node.js 20 or 22** (22 is what this was developed on)
 - `npm` (comes with Node)
-- A Chromium/Chrome that Playwright can launch (installed in [§7](#7-install-a-browser-for-playwright))
 
 Optional:
 
-- `xvfb` + Google Chrome — only if headless login is blocked (see [§15](#15-headed-chrome--xvfb-fallback))
-- `docker` — see [§14](#14-docker)
+- Playwright Chromium — **only** for `investigate.js` / `capture-frames.js`
+  (protocol re-capture). The live scraper does not use it.
+- `docker` — see [§13](#13-docker)
 
 ### Market hours (so “empty” values make sense)
 
@@ -155,12 +145,12 @@ git clone https://github.com/anurag-roy/go-charting-scraper.git
 cd go-charting-scraper
 ```
 
-If you are deploying a specific branch (for example the Max Vol POC branch):
+If you are deploying a specific branch:
 
 ```bash
 git clone https://github.com/anurag-roy/go-charting-scraper.git
 cd go-charting-scraper
-git checkout cursor/maxvol-poc-csv-c8af   # or main, once merged
+git checkout <branch>   # or main
 ```
 
 Layout you will use:
@@ -175,7 +165,7 @@ go-charting-scraper/
     evidence/
       footprint.proto      ← Protobuf schema used to decode frames
       maxvol-poc.csv       ← example 5-minute run
-    out/                   ← gitignored; screenshots + debug logs
+    out/                   ← gitignored; debug logs
 ```
 
 ---
@@ -215,51 +205,15 @@ npm ci          # preferred: exact lockfile versions
 # if npm ci fails (no lock / dirty tree): npm install
 ```
 
-This installs `playwright`, `protobufjs`, `pako`, and `ws` into
-`investigation/node_modules/` (gitignored).
-
-`npm ci` / `npm install` does **not** download a browser binary by itself.
-Do the next section.
-
----
-
-## 7. Install a browser for Playwright
-
-### Recommended: Playwright Chromium (headless, no Google Chrome package)
-
-Still inside `investigation/`:
-
-```bash
-npx playwright install --with-deps chromium
-```
-
-- `install chromium` downloads Playwright’s Chromium into
-  `~/.cache/ms-playwright/`.
-- `--with-deps` installs Ubuntu/Debian system libraries (fonts, `libnss3`,
-  `libgbm1`, etc.) via `apt`. Needs `sudo` on a fresh server.
-
-Confirm:
-
-```bash
-ls ~/.cache/ms-playwright | head
-npx playwright --version    # should report 1.62.x to match package.json
-```
-
-### Alternative: system Google Chrome
-
-If you already have Chrome:
-
-```bash
-google-chrome --version    # or google-chrome-stable --version
-```
-
-Then pass `PW_CHANNEL=chrome` on every run. You still want the OS libraries
-Playwright expects (`npx playwright install --with-deps chrome` can install
-Chrome + deps).
+This installs `protobufjs`, `pako`, `ws`, and `playwright` into
+`investigation/node_modules/` (gitignored). Playwright is only used by the
+optional capture scripts in [§17](#17-investigation--debug-scripts). The live
+scraper does **not** launch a browser and does **not** need
+`npx playwright install`.
 
 ---
 
-## 8. Configure credentials
+## 7. Configure credentials
 
 The scraper **refuses to start** without both variables:
 
@@ -294,7 +248,6 @@ sudo mkdir -p /etc/gocharting
 sudo tee /etc/gocharting/env >/dev/null <<'EOF'
 GOCHARTING_EMAIL=you@example.com
 GOCHARTING_PASSWORD=your-password
-HEADLESS=1
 CSV_PATH=/var/lib/gocharting/maxvol.csv
 OUT_DIR=/var/lib/gocharting/out
 EOF
@@ -317,33 +270,32 @@ script does **not** auto-load `.env` — you must `export` / `source` it.
 
 ---
 
-## 9. First successful scrape
+## 8. First successful scrape
 
 From `investigation/` with credentials exported:
 
 ```bash
 cd /path/to/go-charting-scraper/investigation
 
-# One snapshot of the latest candle on 5m / 10m / 15m (~30–45 seconds)
-HEADLESS=1 RUN_MS=0 node poc-log-maxvol.js
+# One snapshot of the latest candle on 5m / 10m / 15m (~5–15 seconds)
+RUN_MS=0 node poc-log-maxvol.js
 ```
 
-`RUN_MS=0` means “take the sample at t=0 and exit” (login + one
+`RUN_MS=0` means “take the sample at t=0 and exit” (Cognito + one
 `FOOTPRINT/V2` round-trip). Default without `RUN_MS` is a **5-minute** run.
 
 ### Success looks like
 
 ```text
-browser launch { headless: true, channel: 'playwright-chromium' }
-goto https://gocharting.com/terminal/chart/kd5OXEIXs
-login
-loginModalGone= true url= https://gocharting.com/terminal/chart/kd5OXEIXs
+cognito login (USER_PASSWORD_AUTH, no browser)
+cognito ok expiresIn= 28800 s
 session dates (IST): 2026-08-14, 2026-08-13, 2026-08-12
 sampling 5m, 10m, 15m every 30s for 0s
+ws wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws
 csv -> .../evidence/maxvol-poc.csv
 
---- sample 1 @ 2026-08-13T18:41:57.875Z ---
-  5m: ok=true candle=2026-08-13T23:30:00+05:30  MaxVolB=0 MaxVolS=10 match=true n=172
+--- sample 1 @ 2026-08-14T18:20:00.000Z ---
+  5m: ok=true candle=2026-08-14T23:30:00+05:30  MaxVolB=0 MaxVolS=10 match=true n=172
   10m: ok=true ...
   15m: ok=true ...
 DONE samples= 1 csv= ...
@@ -353,7 +305,7 @@ Checklist:
 
 | Check | Meaning |
 | --- | --- |
-| `loginModalGone= true` | Cognito login succeeded |
+| `cognito ok` | `InitiateAuth` returned an id token |
 | `ok=true` | At least one footprint candle decoded |
 | `match=true` | Server max equals recomputed per-level max |
 | `n=` large (tens–hundreds) | Full session history came back, not an empty payload |
@@ -361,15 +313,13 @@ Checklist:
 Also written:
 
 - CSV: `investigation/evidence/maxvol-poc.csv` unless `CSV_PATH` is set
-- Screenshot: `investigation/out/poc/after-login.png` (or `OUT_DIR`)
 - Debug JSONL: `investigation/out/poc/debug.jsonl` (tokens redacted)
 
-If `loginModalGone= false`, see [§18](#18-troubleshooting). A
-`login-failed.png` is saved in `OUT_DIR`.
+If Cognito fails, see [§16](#16-troubleshooting).
 
 ---
 
-## 10. Environment variables
+## 9. Environment variables
 
 All are optional except the two credentials.
 
@@ -377,15 +327,16 @@ All are optional except the two credentials.
 | --- | --- | --- |
 | `GOCHARTING_EMAIL` | *(required)* | Login email |
 | `GOCHARTING_PASSWORD` | *(required)* | Login password |
-| `HEADLESS` | unset / false | `1`, `true`, or `yes` → Playwright `headless: true`. **Use this on servers.** |
-| `PW_CHANNEL` | unset | `chrome` = system Google Chrome. Unset = Playwright’s Chromium. |
 | `RUN_MS` | `300000` (5 min) | How long to keep sampling after the first sample. `0` = one shot. |
 | `SAMPLE_MS` | `30000` | Delay between samples. |
 | `LAST_N` | `0` (off) | If `> 0`, print the last N candles per interval to stdout (CSV still stores the **latest** candle only). |
 | `CSV_PATH` | `investigation/evidence/maxvol-poc.csv` | Destination CSV (overwritten each run). |
-| `OUT_DIR` | `investigation/out/poc` | Screenshots + `debug.jsonl`. |
+| `OUT_DIR` | `investigation/out/poc` | `debug.jsonl`. |
+| `WS_DC` | `blr1` | Market-data datacenter (`blr1` or `nyc1`). MCX crude uses `blr1`. |
+| `WS_TAG` | `go-charting-scraper` | `tag=` query param on the WebSocket URL (device id). |
 
-Launch args always include `--no-sandbox` and `--disable-dev-shm-usage`.
+`HEADLESS` and `PW_CHANNEL` are unused by the live scraper (kept as no-ops if
+your old systemd unit still sets them).
 
 Sampling math: samples are taken at `t = 0, SAMPLE_MS, 2*SAMPLE_MS, …`
 while `t ≤ RUN_MS`.
@@ -403,7 +354,7 @@ like:
 
 ---
 
-## 11. CSV output
+## 10. CSV output
 
 Default path: `investigation/evidence/maxvol-poc.csv`.
 
@@ -440,7 +391,7 @@ Example committed run: [`investigation/evidence/maxvol-poc.csv`](investigation/e
 
 ---
 
-## 12. Common recipes
+## 11. Common recipes
 
 All commands assume you are in `investigation/` and credentials are
 exported.
@@ -448,14 +399,14 @@ exported.
 ### One-shot, latest candle only (cron-friendly)
 
 ```bash
-HEADLESS=1 RUN_MS=0 CSV_PATH=/var/lib/gocharting/maxvol-$(date -u +%Y%m%dT%H%M%SZ).csv \
+RUN_MS=0 CSV_PATH=/var/lib/gocharting/maxvol-$(date -u +%Y%m%dT%H%M%SZ).csv \
   node poc-log-maxvol.js
 ```
 
 ### Last 5 completed/forming candles (stdout)
 
 ```bash
-HEADLESS=1 RUN_MS=0 LAST_N=5 node poc-log-maxvol.js
+RUN_MS=0 LAST_N=5 node poc-log-maxvol.js
 ```
 
 CSV still has one row per interval (the latest candle). Read the `last 5`
@@ -464,68 +415,38 @@ block in the log for the rest.
 ### Live 5-minute sampler (repo default)
 
 ```bash
-HEADLESS=1 node poc-log-maxvol.js
+node poc-log-maxvol.js
 ```
 
 ### Live 1-hour sampler, one row every 30s
 
 ```bash
-HEADLESS=1 RUN_MS=3600000 SAMPLE_MS=30000 \
+RUN_MS=3600000 SAMPLE_MS=30000 \
   CSV_PATH=/var/lib/gocharting/maxvol-hour.csv \
   node poc-log-maxvol.js
 ```
 
-Restart before the JWT expires (~1 hour) or accept a reconnect/login on
-the next process start.
-
-### System Chrome instead of Playwright Chromium
-
-```bash
-HEADLESS=1 PW_CHANNEL=chrome RUN_MS=0 node poc-log-maxvol.js
-```
+The process refreshes the Cognito JWT when less than five minutes of
+lifetime remain, so a multi-hour run does not need a restart for auth.
 
 ---
 
-## 13. Linux server / unattended deploy
+## 12. Linux server / unattended deploy
 
-### 13.1 Dedicated user and directories
+### 12.1 Dedicated user and directories
 
 ```bash
 sudo useradd --system --home /var/lib/gocharting --shell /usr/sbin/nologin gocharting || true
 sudo mkdir -p /opt/go-charting-scraper /var/lib/gocharting/out
 sudo chown -R gocharting:gocharting /var/lib/gocharting
 
-# clone as that user, or clone then chown
 sudo git clone https://github.com/anurag-roy/go-charting-scraper.git /opt/go-charting-scraper
 cd /opt/go-charting-scraper/investigation
-sudo -H -u gocharting bash -lc 'cd /opt/go-charting-scraper/investigation && npm ci && npx playwright install chromium'
-# --with-deps must run as root once:
-sudo /opt/go-charting-scraper/investigation/node_modules/.bin/playwright install --with-deps chromium
+sudo -H -u gocharting bash -lc 'cd /opt/go-charting-scraper/investigation && npm ci'
 sudo chown -R gocharting:gocharting /opt/go-charting-scraper
 ```
 
-Playwright browsers downloaded as `root` land in `/root/.cache/ms-playwright`.
-Either run `npx playwright install chromium` **as `gocharting`** (shown
-above) or set `PLAYWRIGHT_BROWSERS_PATH` to a shared directory both the
-install and the service use, for example `/var/lib/gocharting/ms-playwright`.
-
-```bash
-# optional: shared browser cache
-sudo mkdir -p /var/lib/gocharting/ms-playwright
-sudo chown gocharting:gocharting /var/lib/gocharting/ms-playwright
-# add to /etc/gocharting/env:
-# PLAYWRIGHT_BROWSERS_PATH=/var/lib/gocharting/ms-playwright
-```
-
-Then as `gocharting`:
-
-```bash
-export PLAYWRIGHT_BROWSERS_PATH=/var/lib/gocharting/ms-playwright
-cd /opt/go-charting-scraper/investigation
-npx playwright install chromium
-```
-
-### 13.2 systemd — one-shot on a timer (recommended)
+### 12.2 systemd — one-shot on a timer (recommended)
 
 `/etc/systemd/system/gocharting-maxvol.service`:
 
@@ -541,10 +462,7 @@ User=gocharting
 Group=gocharting
 WorkingDirectory=/opt/go-charting-scraper/investigation
 EnvironmentFile=/etc/gocharting/env
-Environment=HEADLESS=1
 Environment=RUN_MS=0
-# Uncomment if using system Chrome:
-# Environment=PW_CHANNEL=chrome
 ExecStart=/usr/bin/node poc-log-maxvol.js
 Nice=10
 ```
@@ -576,41 +494,33 @@ With `CSV_PATH=/var/lib/gocharting/maxvol.csv` each shot **overwrites** the
 file. For an append-only archive, use a timestamped `CSV_PATH` in a small
 wrapper script as `ExecStart`.
 
-### 13.3 systemd — long-running process
+### 12.3 systemd — long-running process
 
-Set `RUN_MS` to the window you want (keep it under ~50 minutes so the JWT
-does not expire mid-run), and `Restart=on-failure` with `RestartSec=30`.
+Set `RUN_MS` to the window you want. The scraper refreshes the JWT in
+process; `Restart=on-failure` with `RestartSec=30` is still a good idea.
 
-For a process that should sample forever, a timer that starts a 30–45
-minute `RUN_MS` job is simpler than an infinite loop: each job logs in
-fresh.
-
-### 13.4 cron alternative
+### 12.4 cron alternative
 
 `/etc/cron.d/gocharting`:
 
 ```cron
-*/5 * * * * gocharting bash -lc 'set -a; source /etc/gocharting/env; set +a; cd /opt/go-charting-scraper/investigation && /usr/bin/node poc-log-maxvol.js >> /var/lib/gocharting/run.log 2>&1'
+*/5 * * * * gocharting bash -lc 'set -a; source /etc/gocharting/env; set +a; cd /opt/go-charting-scraper/investigation && RUN_MS=0 /usr/bin/node poc-log-maxvol.js >> /var/lib/gocharting/run.log 2>&1'
 ```
-
-Ensure `/etc/gocharting/env` contains `HEADLESS=1` and `RUN_MS=0`.
 
 ---
 
-## 14. Docker
+## 13. Docker
 
-Playwright publishes images that already contain Chromium and OS deps.
-Tag should match `package.json` (`playwright` `^1.62.1`):
+A plain Node image is enough (no Playwright/Chromium):
 
 ```dockerfile
-FROM mcr.microsoft.com/playwright:v1.62.1-jammy
+FROM node:22-bookworm-slim
 
 WORKDIR /app
 COPY investigation/package.json investigation/package-lock.json ./
 RUN npm ci --omit=dev
 COPY investigation/ ./
 
-ENV HEADLESS=1
 ENV RUN_MS=0
 # credentials at runtime, not in the image:
 #   -e GOCHARTING_EMAIL -e GOCHARTING_PASSWORD
@@ -623,75 +533,41 @@ Build and run:
 ```bash
 docker build -t gocharting-scraper .
 docker run --rm \
-  --ipc=host \
   -e GOCHARTING_EMAIL \
   -e GOCHARTING_PASSWORD \
-  -e HEADLESS=1 \
   -e RUN_MS=0 \
   -e CSV_PATH=/data/maxvol.csv \
   -v /var/lib/gocharting:/data \
   gocharting-scraper
 ```
 
-`--ipc=host` (or the script’s `--disable-dev-shm-usage`, already set)
-avoids Chromium crashing on a tiny `/dev/shm` in Docker.
-
 Do not bake passwords into the image.
 
 ---
 
-## 15. Headed Chrome + Xvfb fallback
-
-Use this only if `HEADLESS=1` fails login (modal stays up, captcha, or
-empty screenshot). This is how the original capture tooling ran.
-
-```bash
-sudo apt-get install -y xvfb google-chrome-stable
-cd investigation
-export GOCHARTING_EMAIL=...
-export GOCHARTING_PASSWORD=...
-PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
-```
-
-Leave `HEADLESS` unset so the script launches `headless: false` inside the
-virtual framebuffer.
-
-systemd `ExecStart` becomes:
-
-```ini
-Environment=PW_CHANNEL=chrome
-ExecStart=/usr/bin/xvfb-run -a /usr/bin/node poc-log-maxvol.js
-```
-
-On this project, **headless was verified to work**, so you should not need
-Xvfb unless GoCharting starts blocking headless Chrome.
-
----
-
-## 16. What the scraper does *not* do
+## 14. What the scraper does *not* do
 
 By design, matching the original investigation constraints:
 
+- It does **not** open gocharting.com in a browser.
 - It does **not** change GoCharting profile or chart settings.
 - It does **not** click timeframe / layout / indicator buttons.
 - 5m / 10m / 15m are requested as `FOOTPRINT/V2` WebSocket commands.
-- It only clicks **Dismiss** (promo), **login avatar**, and **Sign In**.
 - It does **not** persist cookies between process starts (each run logs in
-  again).
+  via Cognito again).
 - It does **not** subscribe to the live `trade` tape for incremental
   updates; it re-fetches footprint snapshots. That is enough for 30s
   polling.
 
 ---
 
-## 17. Hardcoded target (chart / symbol / intervals)
+## 15. Hardcoded target (symbol / intervals)
 
-Edit `investigation/poc-log-maxvol.js` if you need a different layout or
-contract. Constants at the top:
+Edit `investigation/poc-log-maxvol.js` if you need a different contract.
+Constants at the top:
 
 ```js
-const CHART_URL = 'https://gocharting.com/terminal/chart/kd5OXEIXs';
-const DEFAULT_WS_HOST = 'wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws';
+const WS_DC = process.env.WS_DC || 'blr1';
 const SYMBOL = { exchange: 'MCX', segment: 'FUTURE', symbol: 'CRUDEOIL-I' };
 const INTERVALS = ['5m', '10m', '15m'];
 const SESSION = 'RTH';
@@ -699,62 +575,51 @@ const SESSION = 'RTH';
 
 Notes:
 
-- `CHART_URL` is used so login happens on a real terminal page (Cognito +
-  WS token). The footprint **payload** uses `SYMBOL` + `INTERVALS`, not
-  whatever panes happen to be visible.
+- The footprint **payload** uses `SYMBOL` + `INTERVALS`. The saved chart
+  URL is not loaded.
 - Interval strings must be what the API expects (`5m`, `10m`, `15m` are
   confirmed).
 - `SESSION` is `RTH` as sent by the official client for this contract.
-- `DEFAULT_WS_HOST` is a fallback if the page’s WS URL is not observed;
-  the live host is taken from the browser after login when possible.
+- WebSocket host is `wss://origin.ws.prodb.${WS_DC}.gocharting.com/${WS_DC}/ws`.
 - Session calendar dates are computed in **Asia/Kolkata** (today,
   yesterday, day before) and requested newest-first.
 
 ---
 
-## 18. Troubleshooting
+## 16. Troubleshooting
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
 | `missing GOCHARTING_EMAIL / GOCHARTING_PASSWORD` | Env not exported in that shell / service | `echo ${#GOCHARTING_EMAIL}` (length only). systemd: `EnvironmentFile=` path and `chmod 600`. |
-| `browserType.launch: Executable doesn't exist` | Chromium not installed for this user | `npx playwright install chromium` as the **same user** that runs the service. Or set `PLAYWRIGHT_BROWSERS_PATH`. |
-| `TargetClosedError` / sandbox errors | Restricted container | Script already uses `--no-sandbox`. Install `--with-deps`. Give the cgroup enough memory. |
-| `login modal still present` | Bad password, captcha, headless blocked, slow UI | Open `OUT_DIR/login-failed.png`. Retry headed+Xvfb ([§15](#15-headed-chrome--xvfb-fallback)). Wait: login currently sleeps 8s after submit. |
-| `loginModalGone= true` but `ok=false` / `no candles` | WS token missing, weekend/holiday, wrong symbol | Check `OUT_DIR/debug.jsonl` for `poc-ws-open`, `footprint`, `decode-err`. Confirm the contract is trading / has a session date. |
-| `could not obtain market-data websocket URL` | Chart page never opened WS | Screenshot `after-login.png`. Confirm egress to `origin.ws.prodb.blr1.gocharting.com`. |
+| `cognito auth failed` | Bad password, user not confirmed, or Cognito throttling | Confirm the email/password work on gocharting.com. Check `debug.jsonl` for `cognito-ok` vs the error string (no secrets). |
+| `cognito extra challenge` | MFA / new-password / custom challenge | This client uses `USER_PASSWORD_AUTH` only. Accounts that need MFA cannot be scraped this way without extra challenge handling. |
+| `ws connect timeout` / `ws unexpected HTTP` | Egress blocked, wrong DC, or TLS intercept | Confirm outbound `443` to `origin.ws.prodb.blr1.gocharting.com`. Try `WS_DC=nyc1` only for US-sited symbols. |
+| `ok=false` / `no candles` | Weekend/holiday, wrong symbol, or closed session with no history | Check `OUT_DIR/debug.jsonl` for `poc-ws-open`, `footprint`, `decode-err`. Confirm the contract is trading / has a session date. |
 | All Max Vol B/S are `0` / tiny at 23:30 IST | Session closed | Expected. Use `LAST_N=5` to see the last full bars. |
 | `values_match=false` | Decoder/schema drift | Re-fetch `footprint.proto` from `https://gocharting.com/assets/proto/1.1/footprint.proto` into `evidence/`. Open an issue with a redacted debug line. |
 | CSV missing / empty | Wrong cwd or `CSV_PATH` not writable | Run from `investigation/`, or set an absolute `CSV_PATH`. |
-| Process killed (137) | OOM | 2 GB RAM or swap; do not run many Chromes in parallel. |
-| Works on SSH but not systemd | Different user / no env / no browser cache | See [§13.1](#131-dedicated-user-and-directories). `journalctl -u gocharting-maxvol.service`. |
+| Works on SSH but not systemd | Different user / no env | See [§12.1](#121-dedicated-user-and-directories). `journalctl -u gocharting-maxvol.service`. |
 
 Enable a one-off verbose look without extra flags: `OUT_DIR` +
-`debug.jsonl` + the after-login PNG are enough. Never paste
-`debug.jsonl` in public tickets without checking — redaction is best-effort.
+`debug.jsonl` are enough. Never paste `debug.jsonl` in public tickets
+without checking — redaction is best-effort.
 
-### Quick self-test matrix
+### Quick self-test
 
 ```bash
-# 1) Playwright Chromium, headless (should be your default)
-HEADLESS=1 RUN_MS=0 node poc-log-maxvol.js
-
-# 2) System Chrome, headless
-HEADLESS=1 PW_CHANNEL=chrome RUN_MS=0 node poc-log-maxvol.js
-
-# 3) Fallback
-PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
+RUN_MS=0 LAST_N=5 node poc-log-maxvol.js
 ```
 
 ---
 
-## 19. Investigation / debug scripts
+## 17. Investigation / debug scripts
 
 You do **not** need these to scrape. They were used to reverse-engineer
-the protocol (`FINDINGS.md`).
+the protocol (`FINDINGS.md`) and still drive a real browser.
 
 | Script | Role |
 | --- | --- |
-| `poc-log-maxvol.js` | **Production scraper** (this guide) |
+| `poc-log-maxvol.js` | **Production scraper** (this guide) — no browser |
 | `investigate.js` | Login + dump HTTP / WS / console (bodies under `out/`) |
 | `capture-frames.js` | Save full binary WS frames |
 | `decode-frames.js` | Decode saved frames with `footprint.proto` |
@@ -764,27 +629,28 @@ the protocol (`FINDINGS.md`).
 `investigation/out/` is gitignored because captures can contain JWTs and
 cookies even after redaction attempts. Never commit it.
 
-To re-run a protocol capture:
+To re-run a protocol capture (this **does** need Playwright Chromium):
 
 ```bash
 cd investigation
+npx playwright install --with-deps chromium
 export GOCHARTING_EMAIL=... GOCHARTING_PASSWORD=...
 HEADLESS=1 node investigate.js          # or PW_CHANNEL=chrome xvfb-run -a
 ```
 
 ---
 
-## 20. Security, git, and ToS
+## 18. Security, git, and ToS
 
 - Treat `GOCHARTING_PASSWORD` and the JWT as secrets. Rotate the password
   if it ever landed in a log, screenshot, or ticket.
 - Do not commit `/etc/gocharting/env`, `.env`, `investigation/out/`, or
   raw `debug.jsonl` from a failed redaction.
 - CSV files contain **volumes and prices only** and are safe to keep.
-- This automation uses **your** account against GoCharting’s site and
-  WebSocket. Confirm their terms of use allow it. Expect login markup
-  (`#email_field`, `#login-avatar`) to change; that is the usual breakage
-  mode.
+- This automation uses **your** account against GoCharting’s Cognito pool
+  and WebSocket. Confirm their terms of use allow it. The usual breakage
+  mode is a Cognito client-id or `FOOTPRINT/V2` schema change, not login
+  markup.
 - Be polite with polling. The official UI already streams this data;
   30s `FOOTPRINT/V2` snapshots are what the POC used. Sub-second loops
   are unnecessary for Max Vol B/S on 5m+ candles.
@@ -802,14 +668,13 @@ sudo apt-get install -y nodejs
 git clone https://github.com/anurag-roy/go-charting-scraper.git
 cd go-charting-scraper/investigation
 npm ci
-npx playwright install --with-deps chromium
 
 export GOCHARTING_EMAIL='you@example.com'
 read -s GOCHARTING_PASSWORD && export GOCHARTING_PASSWORD
 
-HEADLESS=1 RUN_MS=0 LAST_N=5 node poc-log-maxvol.js
+RUN_MS=0 LAST_N=5 node poc-log-maxvol.js
 ```
 
-When that prints `loginModalGone= true` and `ok=true` for `5m` / `10m` /
-`15m`, scraping is working. Point `CSV_PATH` where you want the file, then
-add the systemd timer in [§13](#13-linux-server--unattended-deploy).
+When that prints `cognito ok` and `ok=true` for `5m` / `10m` / `15m`,
+scraping is working. Point `CSV_PATH` where you want the file, then add
+the systemd timer in [§12](#12-linux-server--unattended-deploy).

@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "poc": "node poc-log-maxvol.js"
+    "poc": "node poc-log-maxvol.js",
+    "poc:once": "node poc-log-maxvol.js"
   },
   "keywords": [],
   "author": "",

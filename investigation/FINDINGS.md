@@ -12,8 +12,10 @@ Target: `https://gocharting.com/terminal/chart/kd5OXEIXs` (a saved 3×3 layout o
 - These numbers are **computed on the server and pushed to the browser** inside a
   **binary Protobuf** message over a **WebSocket** — they are *not* computed in the
   browser and *not* served from any REST/JSON endpoint.
-- Transport: `wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws?token=<JWT>`,
-  command `FOOTPRINT/V2`. Each candle in the response carries a `max` field whose
+- Transport: `wss://origin.ws.prodb.<dc>.gocharting.com/<dc>/ws?token=<JWT>&tag=<id>`
+  (`dc` is `blr1` for MCX crude; the worker template is
+  `wss://origin.ws.prodb.{{__DC__}}.gocharting.com/{{dc}}/ws`). Command
+  `FOOTPRINT/V2`. Each candle in the response carries a `max` field whose
   `buy.volume` / `sell.volume` are exactly these two values.
 - Verified by decoding real captured frames: the server's `max.buy.volume` /
   `max.sell.volume` **exactly equal** the max over the candle's per-level
@@ -22,13 +24,19 @@ Target: `https://gocharting.com/terminal/chart/kd5OXEIXs` (a saved 3×3 layout o
 
 ## Where the data comes from (transport map)
 
-Login is AWS Cognito (`cognito-idp.ap-south-1.amazonaws.com`); it yields a JWT id
-token that is passed as the `?token=` query param when opening the market-data
-WebSocket.
+Login is AWS Cognito `USER_PASSWORD_AUTH` against the public web client the
+site ships in its Amplify config (`region: ap-south-1`, user pool
+`ap-south-1_uuM8MRslb`, client id `3fqhvm22ea8pjsr2spbnv484pr`). A `POST` to
+`https://cognito-idp.ap-south-1.amazonaws.com/` with `X-Amz-Target:
+AWSCognitoIdentityProviderService.InitiateAuth` returns an **id token**. That
+JWT is passed as the `?token=` query param (plus a `tag=` device id) when
+opening the market-data WebSocket. **No browser is required** for this — the
+live scraper (`poc-log-maxvol.js`) does the same Cognito call the website
+does.
 
 | Concern | Channel | Notes |
 | --- | --- | --- |
-| Auth | REST → AWS Cognito | Returns JWT used to authorize the WS. |
+| Auth | REST → AWS Cognito `USER_PASSWORD_AUTH` | Returns JWT used to authorize the WS. |
 | Saved chart layout | `GET gocharting.com/api/chart` | Contains the footprint metric toggles for this chart (`maxBuy_volume:true`, `maxSell_volume:true`). |
 | Symbol metadata | `gocharting.com/api/instruments/*` | Tick size, precision, etc. |
 | Protobuf schemas | `gocharting.com/assets/proto/1.1/footprint.proto`, `.../ohlc_bars.proto` | Public; used by the client to decode binary frames. |
@@ -160,9 +168,9 @@ Scripts:
 - `decode-frames.js` — reproduces the client framing and decodes `FOOTPRINT/V2`
   bodies with `footprint.proto`, verifying `max.buy/sell.volume`.
 - `analyze-ws.js`, `extract.js` — helpers for summarizing frames / grepping bundles.
-- `poc-log-maxvol.js` — live POC: request `5m` / `10m` / `15m` `FOOTPRINT/V2`
-  every 30s and append Max Vol B/S of the latest candle to
-  `evidence/maxvol-poc.csv`. Set `HEADLESS=1` to run without Xvfb.
+- `poc-log-maxvol.js` — live sampler: Cognito HTTPS login (no browser), then
+  request `5m` / `10m` / `15m` `FOOTPRINT/V2` every 30s and append Max Vol B/S
+  of the latest candle to `evidence/maxvol-poc.csv`.
 
 Full clone-to-deploy steps: [`INSTRUCTIONS.md`](../INSTRUCTIONS.md).
 
