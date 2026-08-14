@@ -154,6 +154,53 @@ function fmtOhlc(bar) {
   return `${bar.open}/${bar.high}/${bar.low}/${bar.close}`;
 }
 
+class OhlcCollector {
+  constructor(OHLC) {
+    this.OHLC = OHLC;
+    this.reqInterval = new Map(); // requestId -> interval
+    this.bars = new Map(); // interval -> Map(time -> bar)
+  }
+
+  noteSent(json) {
+    if (!json || typeof json !== 'string' || !json.includes('TS/V2')) return;
+    try {
+      const obj = JSON.parse(json);
+      const interval = obj.payload?.interval;
+      const requestId = obj.request_id ?? obj.requestId;
+      if (obj.command === 'TS/V2' && interval != null && requestId != null) {
+        this.reqInterval.set(String(requestId), interval);
+      }
+    } catch { /* ignore */ }
+  }
+
+  noteBinary(buf) {
+    const fr = parseFrame(buf);
+    if (!fr || fr.cmd !== 'TS/V2') return 0;
+    let msg;
+    try { msg = this.OHLC.decode(fr.body); } catch {
+      return 0;
+    }
+    const obj = this.OHLC.toObject(msg, { longs: Number, defaults: false });
+    const bars = flattenOhlc(obj);
+    const interval = this.reqInterval.get(fr.cursor) || this.reqInterval.get(fr.requestId);
+    if (!interval || !bars.length) return bars.length;
+    this.merge(interval, bars);
+    return bars.length;
+  }
+
+  merge(interval, bars) {
+    if (!this.bars.has(interval)) this.bars.set(interval, new Map());
+    const m = this.bars.get(interval);
+    for (const b of bars) {
+      if (b?.time) m.set(b.time, b);
+    }
+  }
+
+  getBars(interval) {
+    return [...(this.bars.get(interval)?.values() || [])];
+  }
+}
+
 function parseFrame(buf) {
   if (!buf || buf.length < 6) return null;
   let data = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
@@ -232,10 +279,11 @@ function lastNCandles(candles, n) {
 }
 
 class FootprintClient {
-  constructor(wsUrl, FP, OHLC) {
+  constructor(wsUrl, FP, OHLC, ohlcCollector) {
     this.wsUrl = wsUrl;
     this.FP = FP;
     this.OHLC = OHLC;
+    this.ohlcCollector = ohlcCollector;
     this.ws = null;
     this.nextId = 9000;
     this.pending = new Map(); // requestId -> { kind, interval, candles/bars, extra, resolve, timer, quiet }
@@ -317,7 +365,13 @@ class FootprintClient {
   handleBinary(buf) {
     const fr = parseFrame(buf);
     if (!fr) {
-      dbg({ ev: 'poc-unparsed', len: buf.length, b0: buf[0] });
+      const utf8 = buf.toString('utf8');
+      dbg({
+        ev: 'poc-unparsed',
+        len: buf.length,
+        b0: buf[0],
+        utf8: redact(utf8).slice(0, 200),
+      });
       return;
     }
     dbg({ ev: 'poc-frame', cmd: fr.cmd, cursor: fr.cursor, requestId: fr.requestId, body: fr.body.length });
@@ -386,6 +440,7 @@ class FootprintClient {
     const p = this.pending.get(fr.cursor) || this.pending.get(fr.requestId);
     if (!p || p.kind !== 'ohlc') return;
     p.bars.push(...bars);
+    if (this.ohlcCollector && p.interval) this.ohlcCollector.merge(p.interval, bars);
     if (p.quiet) clearTimeout(p.quiet);
     p.quiet = setTimeout(() => this.finish(p.id), 1200);
   }
@@ -481,13 +536,16 @@ class FootprintClient {
           symbol: `${SYMBOL.exchange}:${SYMBOL.segment}:${SYMBOL.symbol}`,
           interval,
           session: SESSION,
+          // Official client always sends these; without them the server ignores the add.
+          hint: 'rows=500',
+          idxs: [Math.max(0, INTERVALS.indexOf(interval))],
         },
       });
     });
   }
 }
 
-async function loginAndGetWsUrl(page, context) {
+async function loginAndGetWsUrl(page, context, ohlcCollector) {
   let wsUrl = '';
   const seen = new Set();
 
@@ -503,7 +561,22 @@ async function loginAndGetWsUrl(page, context) {
     noteUrl(ws.url());
     ws.on('framesent', (d) => {
       const s = typeof d.payload === 'string' ? d.payload : '';
+      if (s) ohlcCollector?.noteSent(s);
       if (s && /FOOTPRINT|command/i.test(s)) dbg({ ev: 'native-sent', data: redact(s).slice(0, 1500) });
+    });
+    ws.on('framereceived', (d) => {
+      const p = d.payload;
+      if (p == null) return;
+      let buf;
+      if (Buffer.isBuffer(p)) buf = p;
+      else if (typeof p === 'string') {
+        if (!p.length || p.charCodeAt(0) === 0x7b) return;
+        buf = Buffer.from(p, 'latin1');
+      } else {
+        buf = Buffer.from(p);
+      }
+      const n = ohlcCollector?.noteBinary(buf) || 0;
+      if (n) dbg({ ev: 'native-ohlc', url: redact(ws.url()), bars: n });
     });
   });
 
@@ -624,6 +697,7 @@ async function main() {
   const ohlcRoot = await protobuf.load(ohlcProtoPath);
   const FP = root.lookupType('fpgc.FootPrintForDateResponse');
   const OHLC = ohlcRoot.lookupType('protobars.OHLCBarResult');
+  const ohlcCollector = new OhlcCollector(OHLC);
 
   const launchOpts = { headless: HEADLESS, args: ['--no-sandbox', '--disable-dev-shm-usage'] };
   if (process.env.PW_CHANNEL) launchOpts.channel = process.env.PW_CHANNEL;
@@ -635,8 +709,8 @@ async function main() {
 
   let client;
   try {
-    const wsUrl = await loginAndGetWsUrl(page, context);
-    client = new FootprintClient(wsUrl, FP, OHLC);
+    const wsUrl = await loginAndGetWsUrl(page, context, ohlcCollector);
+    client = new FootprintClient(wsUrl, FP, OHLC, ohlcCollector);
     await client.connect();
 
     const dates = sessionDates();
@@ -672,7 +746,7 @@ async function main() {
         return { interval: iv, fp, ohlc };
       }));
       for (const { interval, fp: res, ohlc } of results) {
-        const ohlcBars = ohlc?.bars || [];
+        const ohlcBars = dedupeOhlcBars([...(ohlc?.bars || []), ...ohlcCollector.getBars(interval)]);
         if (LAST_N > 0) {
           const slice = lastNCandles(res.candles, LAST_N);
           console.log(`  ${interval} last ${slice.length}/${res.candles?.length || 0}:`);
