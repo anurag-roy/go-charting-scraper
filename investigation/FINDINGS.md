@@ -62,7 +62,10 @@ Each binary frame:
   the remaining bytes are the Protobuf body.
 - Dispatch by command:
   - `FOOTPRINT/V2` → decode body as `fpgc.FootPrintForDateResponse`
-  - `TS/V2` → decode body as `protobars.OHLCBarResult` (OHLCV bars)
+  - `TS/V2` → decode body as `protobars.OHLCBarResult` (OHLCV bars). Each
+    `IntradayOHLCBars` group has a `start` timestamp; each `Candle.offset` is
+    **minutes** after that start (`offset_in = "m"`). Bar time =
+    `start + offset minutes`, which matches `FootPrintCandle.date`.
 
 Decoded footprint responses are cached in the browser's IndexedDB
 (`BinaryFootprint` store) keyed by `exchange:segment:symbol:interval:date:session`.
@@ -161,8 +164,8 @@ Scripts:
   bodies with `footprint.proto`, verifying `max.buy/sell.volume`.
 - `analyze-ws.js`, `extract.js` — helpers for summarizing frames / grepping bundles.
 - `poc-log-maxvol.js` — live POC: request `5m` / `10m` / `15m` `FOOTPRINT/V2`
-  every 30s and append Max Vol B/S of the latest candle to
-  `evidence/maxvol-poc.csv`. Set `HEADLESS=1` to run without Xvfb.
+  and `TS/V2` `OHLCV/V2` every 30s and append OHLC + Max Vol B/S of the latest
+  candle to `evidence/maxvol-poc.csv`. Set `HEADLESS=1` to run without Xvfb.
 
 Full clone-to-deploy steps: [`INSTRUCTIONS.md`](../INSTRUCTIONS.md).
 

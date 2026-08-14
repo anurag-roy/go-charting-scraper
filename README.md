@@ -31,10 +31,10 @@ schema, and proof.
 ## Live proof-of-concept (CSV sampler)
 
 `investigation/poc-log-maxvol.js` logs in to the saved chart, opens the
-market-data WebSocket, and writes **Max Vol B / Max Vol S** for the latest
-`5m`, `10m`, and `15m` footprint candles to CSV every 30 seconds (default 5
-minute run). It does not click chart/timeframe buttons — those intervals are
-requested as `FOOTPRINT/V2` commands.
+market-data WebSocket, and writes **OHLC** plus **Max Vol B / Max Vol S** for
+the latest `5m`, `10m`, and `15m` footprint candles to CSV every 30 seconds
+(default 5 minute run). It does not click chart/timeframe buttons — those
+intervals are requested as `FOOTPRINT/V2` and `TS/V2` `OHLCV/V2` commands.
 
 ```bash
 cd investigation
@@ -46,6 +46,5 @@ PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
 # CSV -> investigation/evidence/maxvol-poc.csv
 ```
 
-A 5-minute live run is committed at
-[`investigation/evidence/maxvol-poc.csv`](investigation/evidence/maxvol-poc.csv)
-(11 samples × 5m/10m/15m, all `values_match=true`).
+An example scrape with OHLC is committed at
+[`investigation/evidence/maxvol-poc.csv`](investigation/evidence/maxvol-poc.csv).
