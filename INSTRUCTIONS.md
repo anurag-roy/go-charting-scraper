@@ -43,11 +43,12 @@ The live scraper is `investigation/poc-log-maxvol.js`.
 
 It logs into the saved chart
 `https://gocharting.com/terminal/chart/kd5OXEIXs`, then every sample interval
-requests footprint data for **5m**, **10m**, and **15m** candles of
+requests footprint **and OHLC** data for **5m**, **10m**, and **15m** candles of
 `MCX:FUTURE:CRUDEOIL-I` and writes:
 
 | Field | Meaning |
 | --- | --- |
+| **OHLC** | Open / high / low / close of that candle (`TS/V2` `OHLCV/V2` bars) |
 | **Max Vol B** | Largest **buy** volume at any single price level in that candle (`max.buy.volume`) |
 | **Max Vol S** | Largest **sell** volume at any single price level in that candle (`max.sell.volume`) |
 
@@ -73,14 +74,18 @@ choices (browser, outbound hosts, secrets) make sense.
    `wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws?token=<JWT>`.
 3. The Node process opens **its own** WebSocket (the browser is only needed
    for login / token).
-4. It sends JSON `FOOTPRINT/V2` commands for intervals `5m`, `10m`, `15m`.
+4. It sends JSON `FOOTPRINT/V2` commands for intervals `5m`, `10m`, `15m`, and
+   `TS/V2` `OHLCV/V2` for the same symbol/intervals.
 5. The server replies with **binary Protobuf** frames (sometimes
    deflate-compressed). The script decodes them with
-   `investigation/evidence/footprint.proto`.
+   `investigation/evidence/footprint.proto` and
+   `investigation/evidence/ohlc_bars.proto`.
 6. For each interval it keeps the **latest candle** (newest `candle.date`,
-   Asia/Kolkata session) and writes `max.buy.volume` / `max.sell.volume` to CSV.
+   Asia/Kolkata session) and writes OHLC plus `max.buy.volume` /
+   `max.sell.volume` to CSV.
 7. It also recomputes `max(level.buy.volume)` / `max(level.sell.volume)` and
-   records `values_match=true` when they agree with the server.
+   records `values_match=true` when they agree with the server. OHLC bars are
+   matched to the footprint candle by timestamp (`start + offset` minutes).
 
 There is **no REST/JSON endpoint** for these numbers. Do not try to scrape
 them out of the DOM; the chart canvas does not expose them as text.
@@ -173,7 +178,8 @@ go-charting-scraper/
     poc-log-maxvol.js      ← the scraper
     package.json
     evidence/
-      footprint.proto      ← Protobuf schema used to decode frames
+      footprint.proto      ← Protobuf schema used to decode footprint frames
+      ohlc_bars.proto      ← Protobuf schema used to decode OHLC bars
       maxvol-poc.csv       ← example 5-minute run
     out/                   ← gitignored; screenshots + debug logs
 ```
@@ -343,7 +349,7 @@ sampling 5m, 10m, 15m every 30s for 0s
 csv -> .../evidence/maxvol-poc.csv
 
 --- sample 1 @ 2026-08-13T18:41:57.875Z ---
-  5m: ok=true candle=2026-08-13T23:30:00+05:30  MaxVolB=0 MaxVolS=10 match=true n=172
+  5m: ok=true candle=2026-08-13T23:30:00+05:30  OHLC=7945/7945/7945/7945 MaxVolB=0 MaxVolS=10 match=true n=172
   10m: ok=true ...
   15m: ok=true ...
 DONE samples= 1 csv= ...
@@ -398,7 +404,7 @@ like:
 
 ```text
   5m last 5/172:
-    2026-08-13T23:10:00+05:30  MaxVolB=20 MaxVolS=15 totals=88/35 ...
+    2026-08-13T23:10:00+05:30  OHLC=7931/7938/7916/7920  MaxVolB=20 MaxVolS=15 totals=88/35 ...
 ```
 
 ---
@@ -421,6 +427,8 @@ CSV after each job.
 | `interval` | `5m`, `10m`, or `15m` |
 | `symbol` | `MCX:FUTURE:CRUDEOIL-I` |
 | `candle_time` | Footprint candle open time (`FootPrintCandle.date`) |
+| `open` / `high` / `low` / `close` | OHLC of that candle from `TS/V2` `OHLCV/V2` (`protobars.Candle`). Prices are integer ticks, same as `max_vol_*_level`. If the OHLC bar is missing, `high`/`low` fall back to the footprint `ending_summary` (or min/max traded price level). |
+| `ohlc_volume` | Total volume on the OHLC bar (`Candle.volume`). Empty if no matching `TS/V2` bar. |
 | `max_vol_b` | Server **Max Vol B** (`max.buy.volume`) |
 | `max_vol_s` | Server **Max Vol S** (`max.sell.volume`) |
 | `max_vol_b_level` | Price level where recomputed max buy occurred |
@@ -674,7 +682,8 @@ By design, matching the original investigation constraints:
 
 - It does **not** change GoCharting profile or chart settings.
 - It does **not** click timeframe / layout / indicator buttons.
-- 5m / 10m / 15m are requested as `FOOTPRINT/V2` WebSocket commands.
+- 5m / 10m / 15m are requested as `FOOTPRINT/V2` and `TS/V2` `OHLCV/V2`
+  WebSocket commands.
 - It only clicks **Dismiss** (promo), **login avatar**, and **Sign In**.
 - It does **not** persist cookies between process starts (each run logs in
   again).
@@ -724,6 +733,7 @@ Notes:
 | `could not obtain market-data websocket URL` | Chart page never opened WS | Screenshot `after-login.png`. Confirm egress to `origin.ws.prodb.blr1.gocharting.com`. |
 | All Max Vol B/S are `0` / tiny at 23:30 IST | Session closed | Expected. Use `LAST_N=5` to see the last full bars. |
 | `values_match=false` | Decoder/schema drift | Re-fetch `footprint.proto` from `https://gocharting.com/assets/proto/1.1/footprint.proto` into `evidence/`. Open an issue with a redacted debug line. |
+| Empty `open` / `close` | `TS/V2` OHLC bar not matched | Check `OUT_DIR/debug.jsonl` for `ohlc`, `ohlc-miss`, `ohlc-decode-err`. Re-fetch `ohlc_bars.proto`. `high`/`low` may still come from the footprint `ending_summary`. |
 | CSV missing / empty | Wrong cwd or `CSV_PATH` not writable | Run from `investigation/`, or set an absolute `CSV_PATH`. |
 | Process killed (137) | OOM | 2 GB RAM or swap; do not run many Chromes in parallel. |
 | Works on SSH but not systemd | Different user / no env / no browser cache | See [§13.1](#131-dedicated-user-and-directories). `journalctl -u gocharting-maxvol.service`. |
