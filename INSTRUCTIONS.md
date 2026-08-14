@@ -180,7 +180,7 @@ go-charting-scraper/
     evidence/
       footprint.proto      ← Protobuf schema used to decode footprint frames
       ohlc_bars.proto      ← Protobuf schema used to decode OHLC bars
-      maxvol-poc.csv       ← example 5-minute run
+      maxvol-poc.csv       ← example scrape (includes OHLC)
     out/                   ← gitignored; screenshots + debug logs
 ```
 

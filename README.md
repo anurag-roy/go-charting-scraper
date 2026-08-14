@@ -46,6 +46,5 @@ PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
 # CSV -> investigation/evidence/maxvol-poc.csv
 ```
 
-A 5-minute live run is committed at
-[`investigation/evidence/maxvol-poc.csv`](investigation/evidence/maxvol-poc.csv)
-(11 samples × 5m/10m/15m, all `values_match=true`).
+An example scrape with OHLC is committed at
+[`investigation/evidence/maxvol-poc.csv`](investigation/evidence/maxvol-poc.csv).

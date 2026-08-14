@@ -326,6 +326,7 @@ class FootprintClient {
 
   send(obj) {
     const json = JSON.stringify(obj);
+    this.ohlcCollector?.noteSent(json);
     dbg({ ev: 'poc-send', json: redact(json) });
     this.ws.send(json);
   }
@@ -438,9 +439,12 @@ class FootprintClient {
 
     // TS/V2 headers are "TS/V2~<request_id>~<page>"; FOOTPRINT uses request_id in the 3rd slot.
     const p = this.pending.get(fr.cursor) || this.pending.get(fr.requestId);
+    const interval = (p && p.kind === 'ohlc' && p.interval)
+      || this.ohlcCollector?.reqInterval.get(fr.cursor)
+      || this.ohlcCollector?.reqInterval.get(fr.requestId);
+    if (interval && this.ohlcCollector) this.ohlcCollector.merge(interval, bars);
     if (!p || p.kind !== 'ohlc') return;
     p.bars.push(...bars);
-    if (this.ohlcCollector && p.interval) this.ohlcCollector.merge(p.interval, bars);
     if (p.quiet) clearTimeout(p.quiet);
     p.quiet = setTimeout(() => this.finish(p.id), 1200);
   }
