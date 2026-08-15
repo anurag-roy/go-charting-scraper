@@ -1,24 +1,12 @@
-// Proof-of-concept: log Max Vol B / Max Vol S and OHLC every 30s for 5m / 10m /
-// 15m candles, using the FOOTPRINT/V2 + TS/V2 (OHLCV/V2) WebSocket protocol
-// documented in FINDINGS.md.
+// Live scraper: persist closed 2m / 3m / 5m footprint candles (OHLC + Max Vol B/S)
+// for NSE Nifty futures during the 09:15–15:30 IST cash session.
 //
 // Visits the saved chart URL and logs in (required). Does NOT change profile
-// settings or click terminal/chart buttons (no timeframe clicks) — the three
-// intervals are requested directly over the market-data WebSocket.
+// settings or click terminal/chart buttons — intervals are requested over the
+// market-data WebSocket (FOOTPRINT/V2 + TS/V2 OHLCV/V2). See FINDINGS.md.
 //
-// Credentials: GOCHARTING_EMAIL / GOCHARTING_PASSWORD (env only, never written).
-//
-// Usage:
-//   cd investigation && npm install
-//   PW_CHANNEL=chrome xvfb-run -a node poc-log-maxvol.js
-//   HEADLESS=1 node poc-log-maxvol.js
-//
-// Optional env:
-//   RUN_MS      total sampling window (default 300000 = 5 minutes)
-//   SAMPLE_MS   period between samples (default 30000)
-//   LAST_N      if set, also print the last N candles per interval
-//   HEADLESS    1/true to launch Chromium/Chrome without a display
-//   CSV_PATH    output CSV (default investigation/evidence/maxvol-poc.csv)
+// Config: gitignored .env at repo root or investigation/ (see .env.example).
+// Writes to Google Sheets when GOOGLE_SHEET_ID is set; local CSV when WRITE_CSV=1.
 import { chromium } from 'playwright';
 import WebSocket from 'ws';
 import fs from 'node:fs';
@@ -26,30 +14,51 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import protobuf from 'protobufjs';
 import * as pako from 'pako';
+import { loadConfig, validateConfig } from './lib/env.js';
+import { CsvSink } from './lib/csv-sink.js';
+import { SheetsSink } from './lib/sheets-sink.js';
+import { symbolId } from './lib/columns.js';
+import {
+  formatIst,
+  inSession,
+  isAfterClose,
+  isBeforeOpen,
+  isCandleClosed,
+  isPersistableCandle,
+  isWeekendIst,
+  istDateString,
+  istNow,
+  marketWindowMs,
+  sessionDatesFor,
+} from './lib/session.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CHART_URL = 'https://gocharting.com/terminal/chart/kd5OXEIXs';
-const DEFAULT_WS_HOST = 'wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws';
-const SYMBOL = { exchange: 'MCX', segment: 'FUTURE', symbol: 'CRUDEOIL-I' };
-const INTERVALS = ['5m', '10m', '15m'];
-const SESSION = 'RTH';
-
-const RUN_MS = Number(process.env.RUN_MS || 300_000);
-const SAMPLE_MS = Number(process.env.SAMPLE_MS || 30_000);
-const LAST_N = Number(process.env.LAST_N || 0);
-const HEADLESS = /^(1|true|yes)$/i.test(String(process.env.HEADLESS || ''));
-const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'evidence', 'maxvol-poc.csv');
-const OUT_DIR = process.env.OUT_DIR || path.join(__dirname, 'out', 'poc');
-
-const email = process.env.GOCHARTING_EMAIL;
-const password = process.env.GOCHARTING_PASSWORD;
-if (!email || !password) {
-  console.error('missing GOCHARTING_EMAIL / GOCHARTING_PASSWORD');
+const cfg = loadConfig();
+const configErrors = validateConfig(cfg);
+if (configErrors.length) {
+  for (const err of configErrors) console.error(err);
   process.exit(2);
 }
 
+const CHART_URL = cfg.chartUrl;
+const DEFAULT_WS_HOST = cfg.wsHost;
+const SYMBOL = cfg.symbol;
+const INTERVALS = cfg.intervals;
+const SESSION = cfg.session;
+const RUN_MS = cfg.runMs;
+const SAMPLE_MS = cfg.sampleMs;
+const LAST_N = cfg.lastN;
+const HEADLESS = cfg.headless;
+const OUT_DIR = cfg.outDir;
+const email = cfg.email;
+const password = cfg.password;
+const sessionOpts = {
+  open: cfg.marketOpen,
+  close: cfg.marketClose,
+  graceMs: cfg.closeGraceMs,
+};
+
 fs.mkdirSync(OUT_DIR, { recursive: true });
-fs.mkdirSync(path.dirname(CSV_PATH), { recursive: true });
 
 const debugLog = fs.createWriteStream(path.join(OUT_DIR, 'debug.jsonl'));
 const dbg = (o) => debugLog.write(JSON.stringify({ t: new Date().toISOString(), ...o }) + '\n');
@@ -65,42 +74,7 @@ function redact(s) {
   return out;
 }
 
-function csvEscape(v) {
-  const s = v == null ? '' : String(v);
-  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
-
-function istDateString(offsetDays = 0) {
-  const d = new Date(Date.now() + offsetDays * 86_400_000);
-  return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-}
-
-function istNow() {
-  return new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata' }).replace(' ', 'T') + '+05:30';
-}
-
-function sessionDates() {
-  // Today + previous two IST calendar days (session date can lag around midnight).
-  return [istDateString(0), istDateString(-1), istDateString(-2)];
-}
-
 const num = (v) => (v && typeof v === 'object' && 'toNumber' in v ? v.toNumber() : Number(v || 0));
-
-function formatIst(date) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(date);
-  const g = (t) => parts.find((p) => p.type === t)?.value || '';
-  return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}:${g('second')}+05:30`;
-}
 
 function addMinutesIst(startIso, offsetMin) {
   const t = new Date(startIso);
@@ -263,14 +237,6 @@ function summarizeCandle(candle) {
   };
 }
 
-function latestCandle(candles) {
-  if (!candles?.length) return null;
-  return candles.reduce((best, c) => {
-    if (!best) return c;
-    return String(c.date || '') > String(best.date || '') ? c : best;
-  }, null);
-}
-
 function lastNCandles(candles, n) {
   if (!candles?.length) return [];
   return [...candles]
@@ -279,11 +245,14 @@ function lastNCandles(candles, n) {
 }
 
 class FootprintClient {
-  constructor(wsUrl, FP, OHLC, ohlcCollector) {
+  constructor(wsUrl, FP, OHLC, ohlcCollector, { symbol, intervals, session } = {}) {
     this.wsUrl = wsUrl;
     this.FP = FP;
     this.OHLC = OHLC;
     this.ohlcCollector = ohlcCollector;
+    this.symbol = symbol || SYMBOL;
+    this.intervals = intervals || INTERVALS;
+    this.sessionType = session || SESSION;
     this.ws = null;
     this.nextId = 9000;
     this.pending = new Map(); // requestId -> { kind, interval, candles/bars, extra, resolve, timer, quiet }
@@ -493,12 +462,12 @@ class FootprintClient {
         command: 'FOOTPRINT/V2',
         request_id,
         payload: {
-          exchange: SYMBOL.exchange,
-          segment: SYMBOL.segment,
-          symbol: SYMBOL.symbol,
+          exchange: this.symbol.exchange,
+          segment: this.symbol.segment,
+          symbol: this.symbol.symbol,
           interval,
           dates,
-          session: SESSION,
+          session: this.sessionType,
         },
       });
     });
@@ -537,12 +506,12 @@ class FootprintClient {
         action: 'add',
         payload: {
           msg_type: 'OHLCV/V2',
-          symbol: `${SYMBOL.exchange}:${SYMBOL.segment}:${SYMBOL.symbol}`,
+          symbol: symbolId(this.symbol),
           interval,
-          session: SESSION,
+          session: this.sessionType,
           // Official client always sends these; without them the server ignores the add.
           hint: 'rows=500',
-          idxs: [Math.max(0, INTERVALS.indexOf(interval))],
+          idxs: [Math.max(0, this.intervals.indexOf(interval))],
         },
       });
     });
@@ -561,49 +530,55 @@ async function loginAndGetWsUrl(page, context, ohlcCollector) {
     else if (/gocharting\.com.*\/ws/.test(u) && !wsUrl) wsUrl = u;
   };
 
-  page.on('websocket', (ws) => {
-    noteUrl(ws.url());
-    ws.on('framesent', (d) => {
-      const s = typeof d.payload === 'string' ? d.payload : '';
-      if (s) ohlcCollector?.noteSent(s);
-      if (s && /FOOTPRINT|command/i.test(s)) dbg({ ev: 'native-sent', data: redact(s).slice(0, 1500) });
+  if (!page._pocSnifferAttached) {
+    page._pocSnifferAttached = true;
+    page.on('websocket', (ws) => {
+      noteUrl(ws.url());
+      ws.on('framesent', (d) => {
+        const s = typeof d.payload === 'string' ? d.payload : '';
+        if (s) ohlcCollector?.noteSent(s);
+        if (s && /FOOTPRINT|command/i.test(s)) dbg({ ev: 'native-sent', data: redact(s).slice(0, 1500) });
+      });
+      ws.on('framereceived', (d) => {
+        const p = d.payload;
+        if (p == null) return;
+        let buf;
+        if (Buffer.isBuffer(p)) buf = p;
+        else if (typeof p === 'string') {
+          if (!p.length || p.charCodeAt(0) === 0x7b) return;
+          buf = Buffer.from(p, 'latin1');
+        } else {
+          buf = Buffer.from(p);
+        }
+        const n = ohlcCollector?.noteBinary(buf) || 0;
+        if (n) dbg({ ev: 'native-ohlc', url: redact(ws.url()), bars: n });
+      });
     });
-    ws.on('framereceived', (d) => {
-      const p = d.payload;
-      if (p == null) return;
-      let buf;
-      if (Buffer.isBuffer(p)) buf = p;
-      else if (typeof p === 'string') {
-        if (!p.length || p.charCodeAt(0) === 0x7b) return;
-        buf = Buffer.from(p, 'latin1');
-      } else {
-        buf = Buffer.from(p);
-      }
-      const n = ohlcCollector?.noteBinary(buf) || 0;
-      if (n) dbg({ ev: 'native-ohlc', url: redact(ws.url()), bars: n });
-    });
-  });
 
-  try {
-    const cdp = await context.newCDPSession(page);
-    await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
-    await cdp.send('Network.enable');
-    cdp.on('Network.webSocketCreated', (p) => noteUrl(p.url));
-    cdp.on('Target.attachedToTarget', async (ev) => {
-      try {
-        const session = ev.sessionId
-          ? await context.newCDPSession(page).catch(() => null)
-          : null;
-        void session;
-      } catch {}
-    });
-  } catch (e) {
-    dbg({ ev: 'cdp-err', err: e.message });
+    try {
+      const cdp = await context.newCDPSession(page);
+      await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+      await cdp.send('Network.enable');
+      cdp.on('Network.webSocketCreated', (p) => noteUrl(p.url));
+      cdp.on('Target.attachedToTarget', async (ev) => {
+        try {
+          const session = ev.sessionId
+            ? await context.newCDPSession(page).catch(() => null)
+            : null;
+          void session;
+        } catch {}
+      });
+    } catch (e) {
+      dbg({ ev: 'cdp-err', err: e.message });
+    }
   }
 
-  console.log('goto', CHART_URL);
-  await page.goto(CHART_URL, { waitUntil: 'domcontentloaded', timeout: 90_000 });
-  await page.waitForTimeout(5000);
+  const onChart = /gocharting\.com/.test(page.url());
+  if (!onChart) {
+    console.log('goto', CHART_URL);
+    await page.goto(CHART_URL, { waitUntil: 'domcontentloaded', timeout: 90_000 });
+    await page.waitForTimeout(5000);
+  }
 
   const dismiss = page.locator('button', { hasText: /^Dismiss$/ });
   if (await dismiss.count()) {
@@ -611,21 +586,32 @@ async function loginAndGetWsUrl(page, context, ohlcCollector) {
     await page.waitForTimeout(800);
   }
 
-  console.log('login');
-  await page.locator('#login-avatar').click({ timeout: 15_000 });
-  await page.waitForSelector('#email_field', { timeout: 20_000 });
-  await page.fill('#email_field', email);
-  await page.fill('#password_field', password);
-  await page.locator('button[type=submit]', { hasText: /Sign In/i }).click();
-  await page.waitForTimeout(8000);
+  const existingToken = await idTokenFromPage(page);
+  const loginModal = await page.locator('#email_field').count();
+  if (!existingToken || loginModal > 0) {
+    console.log('login');
+    await page.locator('#login-avatar').click({ timeout: 15_000 });
+    await page.waitForSelector('#email_field', { timeout: 20_000 });
+    await page.fill('#email_field', email);
+    await page.fill('#password_field', password);
+    await page.locator('button[type=submit]', { hasText: /Sign In/i }).click();
+    await page.waitForTimeout(8000);
 
-  const stillLogin = await page.locator('#email_field').count();
-  console.log('loginModalGone=', stillLogin === 0, 'url=', page.url());
-  if (stillLogin > 0) {
-    await page.screenshot({ path: path.join(OUT_DIR, 'login-failed.png') }).catch(() => {});
-    throw new Error('login modal still present');
+    const stillLogin = await page.locator('#email_field').count();
+    console.log('loginModalGone=', stillLogin === 0, 'url=', page.url());
+    if (stillLogin > 0) {
+      await page.screenshot({ path: path.join(OUT_DIR, 'login-failed.png') }).catch(() => {});
+      throw new Error('login modal still present');
+    }
+  } else {
+    console.log('already logged in');
   }
   await page.screenshot({ path: path.join(OUT_DIR, 'after-login.png') }).catch(() => {});
+
+  if (!String(wsUrl).includes('token=')) {
+    const fromPage = await wsUrlFromPage(page, wsUrl || DEFAULT_WS_HOST);
+    if (fromPage) wsUrl = fromPage;
+  }
 
   // Wait for the market-data WS (token in query string).
   const deadline = Date.now() + 45_000;
@@ -633,20 +619,8 @@ async function loginAndGetWsUrl(page, context, ohlcCollector) {
     await page.waitForTimeout(500);
   }
 
-  // Fallback: Cognito id token in localStorage.
   if (!String(wsUrl).includes('token=')) {
-    const tok = await page.evaluate(() => {
-      const out = { idToken: '', keys: Object.keys(localStorage) };
-      for (const k of out.keys) {
-        if (/idToken$/i.test(k)) { out.idToken = localStorage.getItem(k) || ''; break; }
-      }
-      return out;
-    });
-    dbg({ ev: 'localStorage-keys', keys: tok.keys.filter((k) => /cognito|token|jwt/i.test(k)) });
-    if (tok.idToken) {
-      const host = wsUrl && wsUrl.startsWith('wss://') ? wsUrl.split('?')[0] : DEFAULT_WS_HOST;
-      wsUrl = `${host}?token=${tok.idToken}`;
-    }
+    wsUrl = await wsUrlFromPage(page, wsUrl || DEFAULT_WS_HOST);
   }
 
   if (!wsUrl) throw new Error('could not obtain market-data websocket URL / token');
@@ -654,44 +628,111 @@ async function loginAndGetWsUrl(page, context, ohlcCollector) {
   return wsUrl;
 }
 
-function writeHeader(stream) {
-  stream.write([
-    'sampled_at_utc',
-    'sampled_at_ist',
-    'sample_n',
-    'interval',
-    'symbol',
-    'candle_time',
-    'open',
-    'high',
-    'low',
-    'close',
-    'ohlc_volume',
-    'max_vol_b',
-    'max_vol_s',
-    'max_vol_b_level',
-    'max_vol_s_level',
-    'totals_buy',
-    'totals_sell',
-    'price_levels',
-    'recomputed_max_b',
-    'recomputed_max_s',
-    'values_match',
-    'candles_in_response',
-    'ok',
-    'error',
-  ].join(',') + '\n');
+async function idTokenFromPage(page) {
+  return page.evaluate(() => {
+    for (const k of Object.keys(localStorage)) {
+      if (/idToken$/i.test(k)) return localStorage.getItem(k) || '';
+    }
+    return '';
+  });
 }
 
-function writeRow(stream, row) {
-  const cols = [
-    row.sampled_at_utc, row.sampled_at_ist, row.sample_n, row.interval, row.symbol,
-    row.candle_time, row.open, row.high, row.low, row.close, row.ohlc_volume,
-    row.max_vol_b, row.max_vol_s, row.max_vol_b_level, row.max_vol_s_level,
-    row.totals_buy, row.totals_sell, row.price_levels, row.recomputed_max_b, row.recomputed_max_s,
-    row.values_match, row.candles_in_response, row.ok, row.error,
-  ];
-  stream.write(cols.map(csvEscape).join(',') + '\n');
+async function wsUrlFromPage(page, fallbackHost) {
+  const tok = await idTokenFromPage(page);
+  if (!tok) return '';
+  const host = String(fallbackHost || DEFAULT_WS_HOST).split('?')[0] || DEFAULT_WS_HOST;
+  return `${host}?token=${tok}`;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function waitForMarketOpen() {
+  while (isBeforeOpen(Date.now(), sessionOpts)) {
+    const today = istDateString(new Date());
+    const { openMs } = marketWindowMs(today, cfg.marketOpen, cfg.marketClose);
+    const remain = Math.max(0, openMs - Date.now());
+    console.log(`waiting for ${cfg.marketOpen} IST open (${Math.ceil(remain / 1000)}s)`);
+    await sleep(Math.min(remain || 1000, 30_000));
+  }
+}
+
+function shouldStop(startedAt) {
+  if (RUN_MS != null) return Date.now() >= startedAt + RUN_MS;
+  const today = istDateString(new Date());
+  const { closeMs } = marketWindowMs(today, cfg.marketOpen, cfg.marketClose);
+  return Date.now() >= closeMs + cfg.afterCloseBufferMs;
+}
+
+function candleToRow({
+  interval, candle, ohlcBars, sampled_at_utc, sampled_at_ist, sample_n, candlesInResponse, error,
+}) {
+  const stats = candle ? summarizeCandle(candle) : {};
+  const bar = candle ? findOhlcBar(ohlcBars, stats.candle_time) : null;
+  if (candle && !bar) {
+    dbg({ ev: 'ohlc-miss', interval, candle_time: stats.candle_time, nBars: ohlcBars.length });
+  }
+  const high = bar ? bar.high : (candle ? stats.fp_high : '');
+  const low = bar ? bar.low : (candle ? stats.fp_low : '');
+  return {
+    sampled_at_utc,
+    sampled_at_ist,
+    sample_n,
+    interval,
+    symbol: symbolId(SYMBOL),
+    candle_time: stats.candle_time || '',
+    open: bar ? bar.open : '',
+    high: high ?? '',
+    low: low ?? '',
+    close: bar ? bar.close : '',
+    ohlc_volume: bar ? bar.volume : '',
+    max_vol_b: candle ? stats.max_vol_b : '',
+    max_vol_s: candle ? stats.max_vol_s : '',
+    max_vol_b_level: candle ? stats.max_vol_b_level : '',
+    max_vol_s_level: candle ? stats.max_vol_s_level : '',
+    totals_buy: candle ? stats.totals_buy : '',
+    totals_sell: candle ? stats.totals_sell : '',
+    price_levels: candle ? stats.price_levels : '',
+    recomputed_max_b: candle ? stats.recomputed_max_b : '',
+    recomputed_max_s: candle ? stats.recomputed_max_s : '',
+    values_match: candle ? stats.values_match : '',
+    candles_in_response: candlesInResponse,
+    ok: Boolean(candle),
+    error: candle ? '' : (error || 'no candle'),
+  };
+}
+
+async function initSinks() {
+  const sinks = [];
+  if (cfg.writeCsv) sinks.push(new CsvSink(cfg.csvPath));
+  if (cfg.sheetId) {
+    sinks.push(new SheetsSink({
+      sheetId: cfg.sheetId,
+      googleCredentialsPath: cfg.googleCredentialsPath,
+      googleCredentialsJson: cfg.googleCredentialsJson,
+      googleClientEmail: cfg.googleClientEmail,
+      googlePrivateKey: cfg.googlePrivateKey,
+    }));
+  }
+  await Promise.all(sinks.map((s) => s.init(INTERVALS)));
+  return sinks;
+}
+
+async function writeToSinks(sinks, rows) {
+  const counts = await Promise.all(sinks.map((s) => Promise.resolve(s.writeRows(rows))));
+  return counts.reduce((a, b) => a + b, 0);
+}
+
+async function refreshAuth(page, context, client, ohlcCollector) {
+  console.log('refreshing market-data websocket token');
+  const host = (client.wsUrl || DEFAULT_WS_HOST).split('?')[0];
+  let wsUrl = await wsUrlFromPage(page, host);
+  if (!wsUrl.includes('token=')) {
+    wsUrl = await loginAndGetWsUrl(page, context, ohlcCollector);
+  }
+  client.wsUrl = wsUrl;
+  await client.connect();
 }
 
 async function main() {
@@ -704,38 +745,69 @@ async function main() {
   const ohlcCollector = new OhlcCollector(OHLC);
 
   const launchOpts = { headless: HEADLESS, args: ['--no-sandbox', '--disable-dev-shm-usage'] };
-  if (process.env.PW_CHANNEL) launchOpts.channel = process.env.PW_CHANNEL;
-  console.log('browser launch', { headless: HEADLESS, channel: process.env.PW_CHANNEL || 'playwright-chromium' });
+  if (cfg.pwChannel) launchOpts.channel = cfg.pwChannel;
+  console.log('browser launch', { headless: HEADLESS, channel: cfg.pwChannel || 'playwright-chromium' });
+  console.log('symbol', symbolId(SYMBOL), 'intervals', INTERVALS.join(', '), 'session', `${cfg.marketOpen}–${cfg.marketClose} IST`);
+  console.log('outputs', {
+    csv: cfg.writeCsv ? cfg.csvPath : false,
+    sheet: cfg.sheetId || false,
+  });
+
+  const sinks = await initSinks();
+  const now0 = Date.now();
+  let oneShotAfterHours = false;
+  if (RUN_MS == null) {
+    if (isWeekendIst(now0)) {
+      console.log('weekend; one-shot backfill of last weekday session');
+      oneShotAfterHours = true;
+    } else if (isBeforeOpen(now0, sessionOpts)) {
+      await waitForMarketOpen();
+    } else if (isAfterClose(now0, sessionOpts)) {
+      console.log('after market close; one-shot backfill of today\'s closed candles');
+      oneShotAfterHours = true;
+    }
+  }
 
   const browser = await chromium.launch(launchOpts);
   const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
   const page = await context.newPage();
 
   let client;
+  let lastAuthAt = Date.now();
   try {
     const wsUrl = await loginAndGetWsUrl(page, context, ohlcCollector);
-    client = new FootprintClient(wsUrl, FP, OHLC, ohlcCollector);
+    client = new FootprintClient(wsUrl, FP, OHLC, ohlcCollector, {
+      symbol: SYMBOL,
+      intervals: INTERVALS,
+      session: SESSION,
+    });
     await client.connect();
 
-    const dates = sessionDates();
-    console.log('session dates (IST):', dates.join(', '));
-    console.log(`sampling ${INTERVALS.join(', ')} every ${SAMPLE_MS / 1000}s for ${RUN_MS / 1000}s`);
-    console.log('csv ->', CSV_PATH);
-
-    const csv = fs.createWriteStream(CSV_PATH);
-    writeHeader(csv);
-
     const start = Date.now();
-    const last = start + RUN_MS;
     let sampleN = 0;
+    let nextAt = start;
 
-    for (let when = start; when <= last; when += SAMPLE_MS) {
-      const wait = when - Date.now();
-      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    while (true) {
+      const wait = nextAt - Date.now();
+      if (wait > 0) await sleep(wait);
+
       sampleN += 1;
-      const sampled_at_utc = new Date().toISOString();
-      const sampled_at_ist = istNow();
+      const nowMs = Date.now();
+      const sampled_at_utc = new Date(nowMs).toISOString();
+      const sampled_at_ist = istNow(new Date(nowMs));
+      const dates = sessionDatesFor(nowMs, sessionOpts);
       console.log(`\n--- sample ${sampleN} @ ${sampled_at_utc} ---`);
+      console.log('session dates (IST):', dates.join(', '));
+
+      if (nowMs - lastAuthAt >= cfg.tokenRefreshMs || client.ws.readyState !== WebSocket.OPEN) {
+        try {
+          await refreshAuth(page, context, client, ohlcCollector);
+          lastAuthAt = Date.now();
+        } catch (e) {
+          console.error('auth refresh failed', e);
+          dbg({ ev: 'auth-refresh-err', err: String(e.message || e) });
+        }
+      }
 
       if (client.ws.readyState !== WebSocket.OPEN) {
         console.log('ws not open; reconnecting');
@@ -749,11 +821,14 @@ async function main() {
         ]);
         return { interval: iv, fp, ohlc };
       }));
+
+      const closedRows = [];
       for (const { interval, fp: res, ohlc } of results) {
         const ohlcBars = dedupeOhlcBars([...(ohlc?.bars || []), ...ohlcCollector.getBars(interval)]);
+        const candles = res.candles || [];
         if (LAST_N > 0) {
-          const slice = lastNCandles(res.candles, LAST_N);
-          console.log(`  ${interval} last ${slice.length}/${res.candles?.length || 0}:`);
+          const slice = lastNCandles(candles, LAST_N);
+          console.log(`  ${interval} last ${slice.length}/${candles.length}:`);
           for (const c of slice) {
             const s = summarizeCandle(c);
             const bar = findOhlcBar(ohlcBars, s.candle_time);
@@ -762,50 +837,55 @@ async function main() {
             );
           }
         }
-        const candle = latestCandle(res.candles);
-        const stats = candle ? summarizeCandle(candle) : {};
-        const bar = candle ? findOhlcBar(ohlcBars, stats.candle_time) : null;
-        if (candle && !bar) {
-          dbg({ ev: 'ohlc-miss', interval, candle_time: stats.candle_time, nBars: ohlcBars.length, ohlcErr: ohlc?.error || '' });
+
+        const closed = candles
+          .filter((c) => isPersistableCandle(c.date, nowMs, sessionOpts))
+          .filter((c) => isCandleClosed(c.date, interval, nowMs, sessionOpts))
+          .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+
+        for (const candle of closed) {
+          closedRows.push(candleToRow({
+            interval,
+            candle,
+            ohlcBars,
+            sampled_at_utc,
+            sampled_at_ist,
+            sample_n: sampleN,
+            candlesInResponse: candles.length,
+            error: res.error,
+          }));
         }
-        const high = bar ? bar.high : (candle ? stats.fp_high : '');
-        const low = bar ? bar.low : (candle ? stats.fp_low : '');
-        const row = {
-          sampled_at_utc,
-          sampled_at_ist,
-          sample_n: sampleN,
-          interval,
-          symbol: `${SYMBOL.exchange}:${SYMBOL.segment}:${SYMBOL.symbol}`,
-          candle_time: stats.candle_time || '',
-          open: bar ? bar.open : '',
-          high: high ?? '',
-          low: low ?? '',
-          close: bar ? bar.close : '',
-          ohlc_volume: bar ? bar.volume : '',
-          max_vol_b: candle ? stats.max_vol_b : '',
-          max_vol_s: candle ? stats.max_vol_s : '',
-          max_vol_b_level: candle ? stats.max_vol_b_level : '',
-          max_vol_s_level: candle ? stats.max_vol_s_level : '',
-          totals_buy: candle ? stats.totals_buy : '',
-          totals_sell: candle ? stats.totals_sell : '',
-          price_levels: candle ? stats.price_levels : '',
-          recomputed_max_b: candle ? stats.recomputed_max_b : '',
-          recomputed_max_s: candle ? stats.recomputed_max_s : '',
-          values_match: candle ? stats.values_match : '',
-          candles_in_response: res.candles?.length || 0,
-          ok: Boolean(res.ok && candle),
-          error: res.ok && candle ? '' : (res.error || 'no candle'),
-        };
-        writeRow(csv, row);
+
+        const forming = candles
+          .filter((c) => isPersistableCandle(c.date, nowMs, sessionOpts) && inSession(c.date, sessionOpts))
+          .filter((c) => !isCandleClosed(c.date, interval, nowMs, sessionOpts))
+          .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')))
+          .at(-1);
         console.log(
-          `  ${interval}: ok=${row.ok} candle=${row.candle_time || '-'}  OHLC=${row.open || '-'}/${row.high || '-'}/${row.low || '-'}/${row.close || '-'} MaxVolB=${row.max_vol_b} MaxVolS=${row.max_vol_s} match=${row.values_match} n=${row.candles_in_response} ${row.error}`,
+          `  ${interval}: closed=${closed.length}/${candles.length} forming=${forming?.date || '-'} err=${res.ok ? '' : (res.error || '')}`,
         );
+        if (closed.length) {
+          const lastClosed = closed[closed.length - 1];
+          const stats = summarizeCandle(lastClosed);
+          const bar = findOhlcBar(ohlcBars, stats.candle_time);
+          console.log(
+            `    last closed ${stats.candle_time}  OHLC=${fmtOhlc(bar)}  MaxVolB=${stats.max_vol_b} MaxVolS=${stats.max_vol_s} match=${stats.values_match}`,
+          );
+        }
       }
+
+      const wrote = await writeToSinks(sinks, closedRows);
+      console.log(`  wrote ${wrote} new closed-candle row(s)`);
+
+      if (oneShotAfterHours || RUN_MS === 0 || shouldStop(start)) break;
+      nextAt += SAMPLE_MS;
+      if (nextAt < Date.now()) nextAt = Date.now();
     }
 
-    csv.end();
-    await new Promise((r) => csv.on('finish', r));
-    console.log('\nDONE samples=', sampleN, 'csv=', CSV_PATH);
+    console.log('\nDONE samples=', sampleN, {
+      csv: cfg.writeCsv ? cfg.csvPath : false,
+      sheet: cfg.sheetId || false,
+    });
   } finally {
     try { client?.ws?.close(); } catch {}
     debugLog.end();
