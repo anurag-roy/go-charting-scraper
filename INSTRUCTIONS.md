@@ -57,6 +57,7 @@ session:
 | **POC** | Point of control: price level with the most total (buy+sell) volume |
 | **Volume** | Footprint total volume (`totals.overall`, else buy+sell) |
 | **OI change** | This bar’s open interest minus the previous bar’s (`TS/V2` `oi`) |
+| **VWAP** | Session volume-weighted average from typical price `(H+L+C)/3`, reset each IST day |
 
 The in-progress (forming) candle is **not** written. After a bar's end time the
 scraper waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the print,
@@ -69,7 +70,7 @@ Weekends backfill the last weekday session and exit.
 
 At least one sink is required:
 
-- **Google Sheet** when `GOOGLE_SHEET_ID` is set (tabs `2m`, `3m`, `5m`)
+- **Google Sheet** when `GOOGLE_SHEET_ID` is set (tabs like `NIFTY-I 5m`)
 - **Local CSV** when `WRITE_CSV=1`
 
 Verified on Linux: Node 22, outbound HTTPS + WSS only (no Chromium, no Xvfb,
@@ -97,8 +98,8 @@ choices (outbound hosts, secrets) make sense.
    `investigation/evidence/ohlc_bars.proto`.
 6. For each interval it keeps every **closed** candle whose open time is in the
    09:15–15:30 IST window for the current (or last weekday) session, and writes
-   OHLC, delta / max delta, Max Vol B/S, POC, footprint volume, and OI change
-   to Google Sheets and/or CSV.
+   OHLC, delta / max delta, Max Vol B/S, POC, footprint volume, OI change, and
+   session VWAP to Google Sheets and/or CSV.
 7. It also recomputes `max(level.buy.volume)` / `max(level.sell.volume)` and
    records `values_match=true` when they agree with the server. OHLC bars are
    matched to the footprint candle by timestamp (`start + offset` minutes).
@@ -374,7 +375,7 @@ Checklist:
 Also written:
 
 - CSV (if `WRITE_CSV=1`): `investigation/evidence/maxvol.csv` unless `CSV_PATH` is set
-- Google Sheet tabs `2m` / `3m` / `5m` (if `GOOGLE_SHEET_ID` is set)
+- Google Sheet tabs `{SYMBOL} {interval}` such as `NIFTY-I 5m` (if `GOOGLE_SHEET_ID` is set)
 - Debug JSONL: `investigation/out/poc/debug.jsonl` (tokens redacted)
 
 If Cognito fails, see [§18](#18-troubleshooting).
@@ -458,6 +459,7 @@ safe to re-run.
 | `volume` | Footprint candle volume (`totals.overall.volume`, else buy+sell) |
 | `oi` | Open interest at the end of the matching OHLC bar |
 | `oi_change` | `oi` minus the previous OHLC bar’s `oi` (empty on the first bar in the response) |
+| `vwap` | Session VWAP from typical price `(H+L+C)/3` × volume, reset each IST session date. After-hours bars are excluded. |
 
 Price `level` values are **integer ticks** as sent by the feed.
 
@@ -469,8 +471,23 @@ An older crude-oil POC run is committed at
 ## 12. Google Sheets
 
 When `GOOGLE_SHEET_ID` is set, each closed candle is appended to a tab named
-after its interval (`2m`, `3m`, `5m`). The same columns as the CSV are used.
-Existing `candle_time` values are not duplicated.
+`{SYMBOL} {interval}` using the contract id only (no exchange or segment).
+Examples: `NIFTY-I 5m`, `NIFTY2681824300CE 5m`. Existing `candle_time` values
+on that tab are not duplicated. Older tabs named only `2m` / `3m` / `5m` are
+left in place and unused.
+
+Sheets use a slim schema (CSV keeps the wider debug columns):
+
+| Column | Description |
+| --- | --- |
+| `candle_time` | Candle open time in IST, without a `+05:30` suffix |
+| `delta` | Buy volume − sell volume |
+| `max_delta` | Intra-bar cumulative-delta high |
+| `max_vol_b` / `max_vol_s` | Server max buy / sell volume at a single price |
+| `poc` | Point of control (price tick with most buy+sell volume) |
+| `volume` | Footprint candle volume |
+| `oi_change` | Change in open interest vs the previous OHLC bar |
+| `vwap` | Session VWAP from typical price `(H+L+C)/3` × volume |
 
 ### One-time Google Cloud setup
 

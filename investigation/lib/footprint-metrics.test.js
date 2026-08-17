@@ -1,6 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { footprintMetrics, oiFields, previousOhlcBar } from './footprint-metrics.js';
+import {
+  footprintMetrics,
+  oiFields,
+  previousOhlcBar,
+  typicalPrice,
+  vwapByCandleTime,
+} from './footprint-metrics.js';
 
 describe('footprintMetrics', () => {
   const candle = {
@@ -87,5 +93,38 @@ describe('oiFields', () => {
   it('finds the previous bar when times are not an exact list match', () => {
     const prev = previousOhlcBar(bars, '2026-08-17T09:20:00+05:30');
     assert.equal(prev.oi, 1000);
+  });
+});
+
+describe('vwapByCandleTime', () => {
+  it('uses typical price (H+L+C)/3', () => {
+    assert.equal(typicalPrice({ high: 12, low: 6, close: 9 }), 9);
+  });
+
+  it('accumulates session VWAP and resets on a new IST date', () => {
+    const map = vwapByCandleTime([
+      { time: '2026-08-17T09:15:00+05:30', high: 10, low: 8, close: 9, volume: 100 },
+      { time: '2026-08-17T09:20:00+05:30', high: 12, low: 10, close: 11, volume: 100 },
+      { time: '2026-08-18T09:15:00+05:30', high: 20, low: 20, close: 20, volume: 50 },
+    ]);
+    assert.equal(map.get('2026-08-17T09:15:00+05:30'), 9);
+    assert.equal(map.get('2026-08-17T09:20:00+05:30'), 10);
+    assert.equal(map.get('2026-08-18T09:15:00+05:30'), 20);
+  });
+
+  it('skips zero-volume bars without resetting the session average', () => {
+    const map = vwapByCandleTime([
+      { time: '2026-08-17T09:15:00+05:30', high: 10, low: 8, close: 9, volume: 100 },
+      { time: '2026-08-17T09:20:00+05:30', high: 99, low: 99, close: 99, volume: 0 },
+    ]);
+    assert.equal(map.get('2026-08-17T09:15:00+05:30'), 9);
+    assert.equal(map.get('2026-08-17T09:20:00+05:30'), 9);
+  });
+
+  it('rounds VWAP to two decimals', () => {
+    const map = vwapByCandleTime([
+      { time: '2026-08-17T09:15:00+05:30', high: 10, low: 8, close: 9.5, volume: 100 },
+    ]);
+    assert.equal(map.get('2026-08-17T09:15:00+05:30'), 9.17);
   });
 });

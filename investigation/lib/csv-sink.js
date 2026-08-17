@@ -40,7 +40,7 @@ export class CsvSink {
     return this.keys;
   }
 
-  async init() {
+  async init(_intervals, _symbol) {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     if (fs.existsSync(this.filePath) && fs.statSync(this.filePath).size > 0) {
       const header = parseCsvLine(readHeaderLine(this.filePath));

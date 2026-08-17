@@ -35,15 +35,15 @@ schema, and proof.
 market-data WebSocket, and persists **OHLC** plus **Max Vol B / Max Vol S** for
 every **closed** `2m`, `3m`, and `5m` candle of `NSE:FUTURE:NIFTY-I` during the
 **09:15–15:30 IST** session: OHLC, **delta** (buy − sell volume), **max delta**,
-**Max Vol B / Max Vol S**, **point of control**, footprint **volume**, and **OI
-change**. Forming (in-progress) bars are not written. It does not click
+**Max Vol B / Max Vol S**, **point of control**, footprint **volume**, **OI
+change**, and session **VWAP**. Forming (in-progress) bars are not written. It does not click
 chart/timeframe buttons — intervals are requested as `FOOTPRINT/V2` and
 `TS/V2` `OHLCV/V2`.
 
 Output is configured in `.env` (see [`.env.example`](.env.example)):
 
-- `GOOGLE_SHEET_ID` — append to a Google spreadsheet (tabs `2m` / `3m` / `5m`)
-- `WRITE_CSV=1` — append the same rows to a local CSV
+- `GOOGLE_SHEET_ID` — append to a Google spreadsheet (tabs like `NIFTY-I 5m`)
+- `WRITE_CSV=1` — append the wider debug rows to a local CSV
 
 ```bash
 cp .env.example .env   # fill in credentials + sheet id and/or WRITE_CSV=1
