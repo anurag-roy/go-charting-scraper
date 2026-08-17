@@ -5,3 +5,11 @@ google-service-account.json
 **/google-service-account.json
 service-account*.json
 *.pem
+node_modules/
+logs/*.log
+logs/*.log.*
+logs/*.json
+logs/*.csv
+logs/*.tmp
+!logs/.gitkeep
+!logs/README.md
