@@ -171,10 +171,10 @@ Scripts:
 - `decode-frames.js` — reproduces the client framing and decodes `FOOTPRINT/V2`
   bodies with `footprint.proto`, verifying `max.buy/sell.volume`.
 - `analyze-ws.js`, `extract.js` — helpers for summarizing frames / grepping bundles.
-- `poc-log-maxvol.js` — live sampler: Cognito HTTPS login (no browser), then
-  request `5m` / `10m` / `15m` `FOOTPRINT/V2` and `TS/V2` `OHLCV/V2` every 30s
-  and append OHLC + Max Vol B/S of the latest candle to
-  `evidence/maxvol-poc.csv`.
+- `poc-log-maxvol.js` — live scraper: Cognito HTTPS login (no browser), then
+  request `2m` / `3m` / `5m` `FOOTPRINT/V2` and `TS/V2` `OHLCV/V2` for closed
+  NSE Nifty session candles and append OHLC + Max Vol B/S to Google Sheets
+  and/or CSV. See `.env.example`.
 
 Full clone-to-deploy steps: [`INSTRUCTIONS.md`](../INSTRUCTIONS.md).
 

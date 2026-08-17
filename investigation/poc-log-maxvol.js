@@ -1,61 +1,68 @@
-// Live sampler: log Max Vol B / Max Vol S and OHLC every 30s for 5m / 10m /
-// 15m candles, using the FOOTPRINT/V2 + TS/V2 (OHLCV/V2) WebSocket protocol
-// documented in FINDINGS.md.
+// Live scraper: persist closed 2m / 3m / 5m footprint candles (OHLC + Max Vol B/S)
+// for NSE Nifty futures during the 09:15–15:30 IST cash session.
 //
 // Auth is AWS Cognito USER_PASSWORD_AUTH (same public client id the website
-// uses). No browser is required. Intervals are requested directly over the
-// market-data WebSocket — the saved chart is not opened.
+// uses). No browser is required. Intervals are requested over the market-data
+// WebSocket (FOOTPRINT/V2 + TS/V2 OHLCV/V2). See FINDINGS.md.
 //
-// Credentials: GOCHARTING_EMAIL / GOCHARTING_PASSWORD (env only, never written).
-//
-// Usage:
-//   cd investigation && npm install
-//   RUN_MS=0 node poc-log-maxvol.js
-//
-// Optional env:
-//   RUN_MS      total sampling window (default 300000 = 5 minutes)
-//   SAMPLE_MS   period between samples (default 30000)
-//   LAST_N      if set, also print the last N candles per interval
-//   CSV_PATH    output CSV (default investigation/evidence/maxvol-poc.csv)
-//   WS_DC       market-data datacenter (default blr1; nyc1 also exists)
+// Config: gitignored .env at repo root or investigation/ (see .env.example).
+// Writes to Google Sheets when GOOGLE_SHEET_ID is set; local CSV when WRITE_CSV=1.
 import WebSocket from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import protobuf from 'protobufjs';
 import * as pako from 'pako';
+import { loadConfig, validateConfig } from './lib/env.js';
+import { CsvSink } from './lib/csv-sink.js';
+import { SheetsSink } from './lib/sheets-sink.js';
+import { symbolId } from './lib/columns.js';
+import {
+  formatIst,
+  inSession,
+  isAfterClose,
+  isBeforeOpen,
+  isCandleClosed,
+  isPersistableCandle,
+  isWeekendIst,
+  istDateString,
+  istNow,
+  marketWindowMs,
+  sessionDatesFor,
+} from './lib/session.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const cfg = loadConfig();
+const configErrors = validateConfig(cfg);
+if (configErrors.length) {
+  for (const err of configErrors) console.error(err);
+  process.exit(2);
+}
 
-// Public Amplify/Cognito config from the GoCharting web client
-// (app bundle Auth.userPoolId / userPoolWebClientId / authenticationFlowType).
+const DEFAULT_WS_HOST = cfg.wsHost;
+const DEVICE_TAG = cfg.wsTag;
+const SYMBOL = cfg.symbol;
+const INTERVALS = cfg.intervals;
+const SESSION = cfg.session;
+const RUN_MS = cfg.runMs;
+const SAMPLE_MS = cfg.sampleMs;
+const LAST_N = cfg.lastN;
+const OUT_DIR = cfg.outDir;
+const email = cfg.email;
+const password = cfg.password;
+
+// Public Amplify/Cognito config from the GoCharting web client.
 const COGNITO_REGION = 'ap-south-1';
 const COGNITO_CLIENT_ID = '3fqhvm22ea8pjsr2spbnv484pr';
 const COGNITO_ENDPOINT = `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`;
 const COGNITO_CLIENT_METADATA = { myCustomKey: 'myCustomValue' };
-
-const WS_DC = process.env.WS_DC || 'blr1';
-const DEFAULT_WS_HOST = `wss://origin.ws.prodb.${WS_DC}.gocharting.com/${WS_DC}/ws`;
-const SYMBOL = { exchange: 'MCX', segment: 'FUTURE', symbol: 'CRUDEOIL-I' };
-const INTERVALS = ['5m', '10m', '15m'];
-const SESSION = 'RTH';
-const DEVICE_TAG = process.env.WS_TAG || 'go-charting-scraper';
-
-const RUN_MS = Number(process.env.RUN_MS || 300_000);
-const SAMPLE_MS = Number(process.env.SAMPLE_MS || 30_000);
-const LAST_N = Number(process.env.LAST_N || 0);
-const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'evidence', 'maxvol-poc.csv');
-const OUT_DIR = process.env.OUT_DIR || path.join(__dirname, 'out', 'poc');
-
-const email = process.env.GOCHARTING_EMAIL;
-const password = process.env.GOCHARTING_PASSWORD;
-if (!email || !password) {
-  console.error('missing GOCHARTING_EMAIL / GOCHARTING_PASSWORD');
-  process.exit(2);
-}
+const sessionOpts = {
+  open: cfg.marketOpen,
+  close: cfg.marketClose,
+  graceMs: cfg.closeGraceMs,
+};
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
-fs.mkdirSync(path.dirname(CSV_PATH), { recursive: true });
 
 const debugLog = fs.createWriteStream(path.join(OUT_DIR, 'debug.jsonl'));
 const dbg = (o) => debugLog.write(JSON.stringify({ t: new Date().toISOString(), ...o }) + '\n');
@@ -71,42 +78,68 @@ function redact(s) {
   return out;
 }
 
-function csvEscape(v) {
-  const s = v == null ? '' : String(v);
-  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
+function jwtExpMs(token) {
+  try {
+    const payload = token.split('.')[1];
+    const json = Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const exp = JSON.parse(json).exp;
+    return Number(exp) * 1000;
+  } catch {
+    return 0;
+  }
 }
 
-function istDateString(offsetDays = 0) {
-  const d = new Date(Date.now() + offsetDays * 86_400_000);
-  return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+async function cognitoInitiateAuth({ username, password: pw, refreshToken }) {
+  const body = refreshToken
+    ? {
+      AuthFlow: 'REFRESH_TOKEN_AUTH',
+      ClientId: COGNITO_CLIENT_ID,
+      AuthParameters: { REFRESH_TOKEN: refreshToken },
+      ClientMetadata: COGNITO_CLIENT_METADATA,
+    }
+    : {
+      AuthFlow: 'USER_PASSWORD_AUTH',
+      ClientId: COGNITO_CLIENT_ID,
+      AuthParameters: { USERNAME: username, PASSWORD: pw },
+      ClientMetadata: COGNITO_CLIENT_METADATA,
+    };
+  const res = await fetch(COGNITO_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-amz-json-1.1',
+      'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth',
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch {
+    throw new Error(`cognito non-json ${res.status}`);
+  }
+  if (!res.ok || data.__type || data.message) {
+    const msg = data.message || data.__type || `HTTP ${res.status}`;
+    throw new Error(`cognito auth failed: ${msg}`);
+  }
+  if (data.ChallengeName) {
+    throw new Error(`cognito extra challenge: ${data.ChallengeName}`);
+  }
+  const ar = data.AuthenticationResult || {};
+  if (!ar.IdToken) throw new Error('cognito auth failed: no IdToken');
+  return {
+    idToken: ar.IdToken,
+    accessToken: ar.AccessToken || '',
+    refreshToken: ar.RefreshToken || refreshToken || '',
+    expiresIn: Number(ar.ExpiresIn || 0),
+    expMs: jwtExpMs(ar.IdToken),
+  };
 }
 
-function istNow() {
-  return new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata' }).replace(' ', 'T') + '+05:30';
-}
-
-function sessionDates() {
-  // Today + previous two IST calendar days (session date can lag around midnight).
-  return [istDateString(0), istDateString(-1), istDateString(-2)];
+function buildWsUrl(idToken) {
+  return `${DEFAULT_WS_HOST}?token=${encodeURIComponent(idToken)}&tag=${encodeURIComponent(DEVICE_TAG)}`;
 }
 
 const num = (v) => (v && typeof v === 'object' && 'toNumber' in v ? v.toNumber() : Number(v || 0));
-
-function formatIst(date) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(date);
-  const g = (t) => parts.find((p) => p.type === t)?.value || '';
-  return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}:${g('second')}+05:30`;
-}
 
 function addMinutesIst(startIso, offsetMin) {
   const t = new Date(startIso);
@@ -269,14 +302,6 @@ function summarizeCandle(candle) {
   };
 }
 
-function latestCandle(candles) {
-  if (!candles?.length) return null;
-  return candles.reduce((best, c) => {
-    if (!best) return c;
-    return String(c.date || '') > String(best.date || '') ? c : best;
-  }, null);
-}
-
 function lastNCandles(candles, n) {
   if (!candles?.length) return [];
   return [...candles]
@@ -284,73 +309,15 @@ function lastNCandles(candles, n) {
     .slice(-n);
 }
 
-function jwtExpMs(token) {
-  try {
-    const payload = token.split('.')[1];
-    const json = Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
-    const exp = JSON.parse(json).exp;
-    return Number(exp) * 1000;
-  } catch {
-    return 0;
-  }
-}
-
-async function cognitoInitiateAuth({ username, password: pw, refreshToken }) {
-  const body = refreshToken
-    ? {
-      AuthFlow: 'REFRESH_TOKEN_AUTH',
-      ClientId: COGNITO_CLIENT_ID,
-      AuthParameters: { REFRESH_TOKEN: refreshToken },
-      ClientMetadata: COGNITO_CLIENT_METADATA,
-    }
-    : {
-      AuthFlow: 'USER_PASSWORD_AUTH',
-      ClientId: COGNITO_CLIENT_ID,
-      AuthParameters: { USERNAME: username, PASSWORD: pw },
-      ClientMetadata: COGNITO_CLIENT_METADATA,
-    };
-  const res = await fetch(COGNITO_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-amz-json-1.1',
-      'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth',
-      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-    },
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch {
-    throw new Error(`cognito non-json ${res.status}`);
-  }
-  if (!res.ok || data.__type || data.message) {
-    const msg = data.message || data.__type || `HTTP ${res.status}`;
-    throw new Error(`cognito auth failed: ${msg}`);
-  }
-  if (data.ChallengeName) {
-    throw new Error(`cognito extra challenge: ${data.ChallengeName}`);
-  }
-  const ar = data.AuthenticationResult || {};
-  if (!ar.IdToken) throw new Error('cognito auth failed: no IdToken');
-  return {
-    idToken: ar.IdToken,
-    accessToken: ar.AccessToken || '',
-    refreshToken: ar.RefreshToken || refreshToken || '',
-    expiresIn: Number(ar.ExpiresIn || 0),
-    expMs: jwtExpMs(ar.IdToken),
-  };
-}
-
-function buildWsUrl(idToken) {
-  return `${DEFAULT_WS_HOST}?token=${encodeURIComponent(idToken)}&tag=${encodeURIComponent(DEVICE_TAG)}`;
-}
-
 class FootprintClient {
-  constructor(FP, OHLC, ohlcCollector) {
+  constructor(FP, OHLC, ohlcCollector, { symbol, intervals, session } = {}) {
+    this.wsUrl = '';
     this.FP = FP;
     this.OHLC = OHLC;
     this.ohlcCollector = ohlcCollector;
-    this.wsUrl = '';
+    this.symbol = symbol || SYMBOL;
+    this.intervals = intervals || INTERVALS;
+    this.sessionType = session || SESSION;
     this.ws = null;
     this.nextId = 9000;
     this.pending = new Map(); // requestId -> { kind, interval, candles/bars, extra, resolve, timer, quiet }
@@ -574,12 +541,12 @@ class FootprintClient {
         command: 'FOOTPRINT/V2',
         request_id,
         payload: {
-          exchange: SYMBOL.exchange,
-          segment: SYMBOL.segment,
-          symbol: SYMBOL.symbol,
+          exchange: this.symbol.exchange,
+          segment: this.symbol.segment,
+          symbol: this.symbol.symbol,
           interval,
           dates,
-          session: SESSION,
+          session: this.sessionType,
         },
       });
     });
@@ -618,56 +585,110 @@ class FootprintClient {
         action: 'add',
         payload: {
           msg_type: 'OHLCV/V2',
-          symbol: `${SYMBOL.exchange}:${SYMBOL.segment}:${SYMBOL.symbol}`,
+          symbol: symbolId(this.symbol),
           interval,
-          session: SESSION,
+          session: this.sessionType,
           // Official client always sends these; without them the server ignores the add.
           hint: 'rows=500',
-          idxs: [Math.max(0, INTERVALS.indexOf(interval))],
+          idxs: [Math.max(0, this.intervals.indexOf(interval))],
         },
       });
     });
   }
 }
 
-function writeHeader(stream) {
-  stream.write([
-    'sampled_at_utc',
-    'sampled_at_ist',
-    'sample_n',
-    'interval',
-    'symbol',
-    'candle_time',
-    'open',
-    'high',
-    'low',
-    'close',
-    'ohlc_volume',
-    'max_vol_b',
-    'max_vol_s',
-    'max_vol_b_level',
-    'max_vol_s_level',
-    'totals_buy',
-    'totals_sell',
-    'price_levels',
-    'recomputed_max_b',
-    'recomputed_max_s',
-    'values_match',
-    'candles_in_response',
-    'ok',
-    'error',
-  ].join(',') + '\n');
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-function writeRow(stream, row) {
-  const cols = [
-    row.sampled_at_utc, row.sampled_at_ist, row.sample_n, row.interval, row.symbol,
-    row.candle_time, row.open, row.high, row.low, row.close, row.ohlc_volume,
-    row.max_vol_b, row.max_vol_s, row.max_vol_b_level, row.max_vol_s_level,
-    row.totals_buy, row.totals_sell, row.price_levels, row.recomputed_max_b, row.recomputed_max_s,
-    row.values_match, row.candles_in_response, row.ok, row.error,
-  ];
-  stream.write(cols.map(csvEscape).join(',') + '\n');
+async function waitForMarketOpen() {
+  while (isBeforeOpen(Date.now(), sessionOpts)) {
+    const today = istDateString(new Date());
+    const { openMs } = marketWindowMs(today, cfg.marketOpen, cfg.marketClose);
+    const remain = Math.max(0, openMs - Date.now());
+    console.log(`waiting for ${cfg.marketOpen} IST open (${Math.ceil(remain / 1000)}s)`);
+    await sleep(Math.min(remain || 1000, 30_000));
+  }
+}
+
+function shouldStop(startedAt) {
+  if (RUN_MS != null) return Date.now() >= startedAt + RUN_MS;
+  const today = istDateString(new Date());
+  const { closeMs } = marketWindowMs(today, cfg.marketOpen, cfg.marketClose);
+  return Date.now() >= closeMs + cfg.afterCloseBufferMs;
+}
+
+function candleToRow({
+  interval, candle, ohlcBars, sampled_at_utc, sampled_at_ist, sample_n, candlesInResponse, error,
+}) {
+  const stats = candle ? summarizeCandle(candle) : {};
+  const bar = candle ? findOhlcBar(ohlcBars, stats.candle_time) : null;
+  if (candle && !bar) {
+    dbg({ ev: 'ohlc-miss', interval, candle_time: stats.candle_time, nBars: ohlcBars.length });
+  }
+  const high = bar ? bar.high : (candle ? stats.fp_high : '');
+  const low = bar ? bar.low : (candle ? stats.fp_low : '');
+  return {
+    sampled_at_utc,
+    sampled_at_ist,
+    sample_n,
+    interval,
+    symbol: symbolId(SYMBOL),
+    candle_time: stats.candle_time || '',
+    open: bar ? bar.open : '',
+    high: high ?? '',
+    low: low ?? '',
+    close: bar ? bar.close : '',
+    ohlc_volume: bar ? bar.volume : '',
+    max_vol_b: candle ? stats.max_vol_b : '',
+    max_vol_s: candle ? stats.max_vol_s : '',
+    max_vol_b_level: candle ? stats.max_vol_b_level : '',
+    max_vol_s_level: candle ? stats.max_vol_s_level : '',
+    totals_buy: candle ? stats.totals_buy : '',
+    totals_sell: candle ? stats.totals_sell : '',
+    price_levels: candle ? stats.price_levels : '',
+    recomputed_max_b: candle ? stats.recomputed_max_b : '',
+    recomputed_max_s: candle ? stats.recomputed_max_s : '',
+    values_match: candle ? stats.values_match : '',
+    candles_in_response: candlesInResponse,
+    ok: Boolean(candle),
+    error: candle ? '' : (error || 'no candle'),
+  };
+}
+
+async function initSinks() {
+  const sinks = [];
+  if (cfg.writeCsv) sinks.push(new CsvSink(cfg.csvPath));
+  if (cfg.sheetId) {
+    sinks.push(new SheetsSink({
+      sheetId: cfg.sheetId,
+      googleCredentialsPath: cfg.googleCredentialsPath,
+      googleCredentialsJson: cfg.googleCredentialsJson,
+      googleClientEmail: cfg.googleClientEmail,
+      googlePrivateKey: cfg.googlePrivateKey,
+    }));
+  }
+  await Promise.all(sinks.map((s) => s.init(INTERVALS)));
+  return sinks;
+}
+
+async function writeToSinks(sinks, rows) {
+  const counts = await Promise.all(sinks.map((s) => Promise.resolve(s.writeRows(rows))));
+  return counts.reduce((a, b) => a + b, 0);
+}
+
+async function refreshAuth(client, auth) {
+  console.log('refreshing cognito token');
+  let next;
+  try {
+    next = await cognitoInitiateAuth({ refreshToken: auth.refreshToken });
+  } catch (e) {
+    dbg({ ev: 'refresh-fail', err: String(e.message || e) });
+    next = await cognitoInitiateAuth({ username: email, password });
+  }
+  dbg({ ev: 'cognito-refresh', expiresIn: next.expiresIn, expMs: next.expMs });
+  await client.connect(buildWsUrl(next.idToken));
+  return next;
 }
 
 async function main() {
@@ -680,59 +701,71 @@ async function main() {
   const ohlcCollector = new OhlcCollector(OHLC);
 
   console.log('cognito login (USER_PASSWORD_AUTH, no browser)');
-  let session = await cognitoInitiateAuth({ username: email, password });
-  dbg({ ev: 'cognito-ok', expiresIn: session.expiresIn, expMs: session.expMs });
-  console.log('cognito ok expiresIn=', session.expiresIn, 's');
+  console.log('symbol', symbolId(SYMBOL), 'intervals', INTERVALS.join(', '), 'session', `${cfg.marketOpen}–${cfg.marketClose} IST`);
+  console.log('ws', DEFAULT_WS_HOST);
+  console.log('outputs', {
+    csv: cfg.writeCsv ? cfg.csvPath : false,
+    sheet: cfg.sheetId || false,
+  });
 
-  const client = new FootprintClient(FP, OHLC, ohlcCollector);
-  const ensureWs = async (forceRefresh = false) => {
-    const remaining = session.expMs - Date.now();
-    const tokenStale = remaining < 5 * 60_000;
-    if (forceRefresh || tokenStale) {
-      console.log('refreshing cognito token');
-      try {
-        session = await cognitoInitiateAuth({ refreshToken: session.refreshToken });
-      } catch (e) {
-        dbg({ ev: 'refresh-fail', err: String(e.message || e) });
-        session = await cognitoInitiateAuth({ username: email, password });
-      }
-      dbg({ ev: 'cognito-refresh', expiresIn: session.expiresIn, expMs: session.expMs });
+  const sinks = await initSinks();
+  const now0 = Date.now();
+  let oneShotAfterHours = false;
+  if (RUN_MS == null) {
+    if (isWeekendIst(now0)) {
+      console.log('weekend; one-shot backfill of last weekday session');
+      oneShotAfterHours = true;
+    } else if (isBeforeOpen(now0, sessionOpts)) {
+      await waitForMarketOpen();
+    } else if (isAfterClose(now0, sessionOpts)) {
+      console.log('after market close; one-shot backfill of today\'s closed candles');
+      oneShotAfterHours = true;
     }
-    const closed = !client.ws || client.ws.readyState !== WebSocket.OPEN;
-    if (forceRefresh || tokenStale || closed) {
-      await client.connect(buildWsUrl(session.idToken));
-    }
-  };
+  }
 
+  let auth = await cognitoInitiateAuth({ username: email, password });
+  dbg({ ev: 'cognito-ok', expiresIn: auth.expiresIn, expMs: auth.expMs });
+  console.log('cognito ok expiresIn=', auth.expiresIn, 's');
+
+  const client = new FootprintClient(FP, OHLC, ohlcCollector, {
+    symbol: SYMBOL,
+    intervals: INTERVALS,
+    session: SESSION,
+  });
+  await client.connect(buildWsUrl(auth.idToken));
+  let lastAuthAt = Date.now();
   try {
-    await ensureWs();
-
-    const dates = sessionDates();
-    console.log('session dates (IST):', dates.join(', '));
-    console.log(`sampling ${INTERVALS.join(', ')} every ${SAMPLE_MS / 1000}s for ${RUN_MS / 1000}s`);
-    console.log('ws', DEFAULT_WS_HOST);
-    console.log('csv ->', CSV_PATH);
-
-    const csv = fs.createWriteStream(CSV_PATH);
-    writeHeader(csv);
 
     const start = Date.now();
-    const last = start + RUN_MS;
     let sampleN = 0;
+    let nextAt = start;
 
-    for (let when = start; when <= last; when += SAMPLE_MS) {
-      const wait = when - Date.now();
-      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    while (true) {
+      const wait = nextAt - Date.now();
+      if (wait > 0) await sleep(wait);
+
       sampleN += 1;
-      const sampled_at_utc = new Date().toISOString();
-      const sampled_at_ist = istNow();
+      const nowMs = Date.now();
+      const sampled_at_utc = new Date(nowMs).toISOString();
+      const sampled_at_ist = istNow(new Date(nowMs));
+      const dates = sessionDatesFor(nowMs, sessionOpts);
       console.log(`\n--- sample ${sampleN} @ ${sampled_at_utc} ---`);
+      console.log('session dates (IST):', dates.join(', '));
 
-      if (!client.ws || client.ws.readyState !== WebSocket.OPEN) {
+      const tokenStale = auth.expMs - nowMs < 5 * 60_000;
+      if (tokenStale || nowMs - lastAuthAt >= cfg.tokenRefreshMs || client.ws.readyState !== WebSocket.OPEN) {
+        try {
+          auth = await refreshAuth(client, auth);
+          lastAuthAt = Date.now();
+        } catch (e) {
+          console.error('auth refresh failed', e);
+          dbg({ ev: 'auth-refresh-err', err: String(e.message || e) });
+        }
+      }
+
+      if (client.ws.readyState !== WebSocket.OPEN) {
         console.log('ws not open; reconnecting');
-        await ensureWs(true);
-      } else {
-        await ensureWs(false);
+        await client.connect(buildWsUrl(auth.idToken));
       }
 
       const results = await Promise.all(INTERVALS.map(async (iv) => {
@@ -742,11 +775,14 @@ async function main() {
         ]);
         return { interval: iv, fp, ohlc };
       }));
+
+      const closedRows = [];
       for (const { interval, fp: res, ohlc } of results) {
         const ohlcBars = dedupeOhlcBars([...(ohlc?.bars || []), ...ohlcCollector.getBars(interval)]);
+        const candles = res.candles || [];
         if (LAST_N > 0) {
-          const slice = lastNCandles(res.candles, LAST_N);
-          console.log(`  ${interval} last ${slice.length}/${res.candles?.length || 0}:`);
+          const slice = lastNCandles(candles, LAST_N);
+          console.log(`  ${interval} last ${slice.length}/${candles.length}:`);
           for (const c of slice) {
             const s = summarizeCandle(c);
             const bar = findOhlcBar(ohlcBars, s.candle_time);
@@ -755,50 +791,55 @@ async function main() {
             );
           }
         }
-        const candle = latestCandle(res.candles);
-        const stats = candle ? summarizeCandle(candle) : {};
-        const bar = candle ? findOhlcBar(ohlcBars, stats.candle_time) : null;
-        if (candle && !bar) {
-          dbg({ ev: 'ohlc-miss', interval, candle_time: stats.candle_time, nBars: ohlcBars.length, ohlcErr: ohlc?.error || '' });
+
+        const closed = candles
+          .filter((c) => isPersistableCandle(c.date, nowMs, sessionOpts))
+          .filter((c) => isCandleClosed(c.date, interval, nowMs, sessionOpts))
+          .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+
+        for (const candle of closed) {
+          closedRows.push(candleToRow({
+            interval,
+            candle,
+            ohlcBars,
+            sampled_at_utc,
+            sampled_at_ist,
+            sample_n: sampleN,
+            candlesInResponse: candles.length,
+            error: res.error,
+          }));
         }
-        const high = bar ? bar.high : (candle ? stats.fp_high : '');
-        const low = bar ? bar.low : (candle ? stats.fp_low : '');
-        const row = {
-          sampled_at_utc,
-          sampled_at_ist,
-          sample_n: sampleN,
-          interval,
-          symbol: `${SYMBOL.exchange}:${SYMBOL.segment}:${SYMBOL.symbol}`,
-          candle_time: stats.candle_time || '',
-          open: bar ? bar.open : '',
-          high: high ?? '',
-          low: low ?? '',
-          close: bar ? bar.close : '',
-          ohlc_volume: bar ? bar.volume : '',
-          max_vol_b: candle ? stats.max_vol_b : '',
-          max_vol_s: candle ? stats.max_vol_s : '',
-          max_vol_b_level: candle ? stats.max_vol_b_level : '',
-          max_vol_s_level: candle ? stats.max_vol_s_level : '',
-          totals_buy: candle ? stats.totals_buy : '',
-          totals_sell: candle ? stats.totals_sell : '',
-          price_levels: candle ? stats.price_levels : '',
-          recomputed_max_b: candle ? stats.recomputed_max_b : '',
-          recomputed_max_s: candle ? stats.recomputed_max_s : '',
-          values_match: candle ? stats.values_match : '',
-          candles_in_response: res.candles?.length || 0,
-          ok: Boolean(res.ok && candle),
-          error: res.ok && candle ? '' : (res.error || 'no candle'),
-        };
-        writeRow(csv, row);
+
+        const forming = candles
+          .filter((c) => isPersistableCandle(c.date, nowMs, sessionOpts) && inSession(c.date, sessionOpts))
+          .filter((c) => !isCandleClosed(c.date, interval, nowMs, sessionOpts))
+          .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')))
+          .at(-1);
         console.log(
-          `  ${interval}: ok=${row.ok} candle=${row.candle_time || '-'}  OHLC=${row.open || '-'}/${row.high || '-'}/${row.low || '-'}/${row.close || '-'} MaxVolB=${row.max_vol_b} MaxVolS=${row.max_vol_s} match=${row.values_match} n=${row.candles_in_response} ${row.error}`,
+          `  ${interval}: closed=${closed.length}/${candles.length} forming=${forming?.date || '-'} err=${res.ok ? '' : (res.error || '')}`,
         );
+        if (closed.length) {
+          const lastClosed = closed[closed.length - 1];
+          const stats = summarizeCandle(lastClosed);
+          const bar = findOhlcBar(ohlcBars, stats.candle_time);
+          console.log(
+            `    last closed ${stats.candle_time}  OHLC=${fmtOhlc(bar)}  MaxVolB=${stats.max_vol_b} MaxVolS=${stats.max_vol_s} match=${stats.values_match}`,
+          );
+        }
       }
+
+      const wrote = await writeToSinks(sinks, closedRows);
+      console.log(`  wrote ${wrote} new closed-candle row(s)`);
+
+      if (oneShotAfterHours || RUN_MS === 0 || shouldStop(start)) break;
+      nextAt += SAMPLE_MS;
+      if (nextAt < Date.now()) nextAt = Date.now();
     }
 
-    csv.end();
-    await new Promise((r) => csv.on('finish', r));
-    console.log('\nDONE samples=', sampleN, 'csv=', CSV_PATH);
+    console.log('\nDONE samples=', sampleN, {
+      csv: cfg.writeCsv ? cfg.csvPath : false,
+      sheet: cfg.sheetId || false,
+    });
   } finally {
     try { client?.ws?.close(); } catch {}
     debugLog.end();
