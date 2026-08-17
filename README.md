@@ -32,9 +32,10 @@ schema, and proof.
 
 `investigation/poc-log-maxvol.js` authenticates with AWS Cognito over HTTPS
 (same `USER_PASSWORD_AUTH` flow as the website — **no browser**), opens the
-market-data WebSocket, and writes **Max Vol B / Max Vol S** for the latest
-`5m`, `10m`, and `15m` footprint candles to CSV every 30 seconds (default 5
-minute run). Intervals are requested as `FOOTPRINT/V2` commands.
+market-data WebSocket, and writes **OHLC** plus **Max Vol B / Max Vol S** for
+the latest `5m`, `10m`, and `15m` footprint candles to CSV every 30 seconds
+(default 5 minute run). Intervals are requested as `FOOTPRINT/V2` and
+`TS/V2` `OHLCV/V2` commands.
 
 ```bash
 cd investigation
@@ -43,6 +44,5 @@ RUN_MS=0 node poc-log-maxvol.js
 # CSV -> investigation/evidence/maxvol-poc.csv
 ```
 
-A 5-minute live run is committed at
-[`investigation/evidence/maxvol-poc.csv`](investigation/evidence/maxvol-poc.csv)
-(11 samples × 5m/10m/15m, all `values_match=true`).
+An example scrape with OHLC is committed at
+[`investigation/evidence/maxvol-poc.csv`](investigation/evidence/maxvol-poc.csv).

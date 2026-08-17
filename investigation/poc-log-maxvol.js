@@ -1,6 +1,6 @@
-// Live sampler: log Max Vol B / Max Vol S every 30s for 5m / 10m / 15m
-// footprint candles, using the FOOTPRINT/V2 WebSocket protocol documented in
-// FINDINGS.md.
+// Live sampler: log Max Vol B / Max Vol S and OHLC every 30s for 5m / 10m /
+// 15m candles, using the FOOTPRINT/V2 + TS/V2 (OHLCV/V2) WebSocket protocol
+// documented in FINDINGS.md.
 //
 // Auth is AWS Cognito USER_PASSWORD_AUTH (same public client id the website
 // uses). No browser is required. Intervals are requested directly over the
@@ -93,6 +93,120 @@ function sessionDates() {
 
 const num = (v) => (v && typeof v === 'object' && 'toNumber' in v ? v.toNumber() : Number(v || 0));
 
+function formatIst(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const g = (t) => parts.find((p) => p.type === t)?.value || '';
+  return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}:${g('second')}+05:30`;
+}
+
+function addMinutesIst(startIso, offsetMin) {
+  const t = new Date(startIso);
+  if (Number.isNaN(t.getTime())) return '';
+  t.setTime(t.getTime() + Number(offsetMin || 0) * 60_000);
+  return formatIst(t);
+}
+
+function flattenOhlc(obj) {
+  const map = obj?.intradayCandles || obj?.intraday_candles || {};
+  const out = [];
+  for (const [sessionDate, group] of Object.entries(map)) {
+    const start = group.start || '';
+    for (const c of group.candles || []) {
+      const offset = num(c.offset);
+      out.push({
+        session_date: sessionDate,
+        offset,
+        time: addMinutesIst(start, offset),
+        open: num(c.open),
+        high: num(c.high),
+        low: num(c.low),
+        close: num(c.close),
+        volume: num(c.volume),
+        oi: num(c.oi),
+      });
+    }
+  }
+  return out;
+}
+
+function findOhlcBar(bars, candleTime) {
+  if (!bars?.length || !candleTime) return null;
+  const exact = bars.find((b) => b.time === candleTime);
+  if (exact) return exact;
+  const t = Date.parse(candleTime);
+  if (!Number.isFinite(t)) return null;
+  return bars.find((b) => Date.parse(b.time) === t) || null;
+}
+
+function dedupeOhlcBars(bars) {
+  const map = new Map();
+  for (const b of bars || []) {
+    if (b?.time) map.set(b.time, b);
+  }
+  return [...map.values()];
+}
+
+function fmtOhlc(bar) {
+  if (!bar) return '-';
+  return `${bar.open}/${bar.high}/${bar.low}/${bar.close}`;
+}
+
+class OhlcCollector {
+  constructor(OHLC) {
+    this.OHLC = OHLC;
+    this.reqInterval = new Map(); // requestId -> interval
+    this.bars = new Map(); // interval -> Map(time -> bar)
+  }
+
+  noteSent(json) {
+    if (!json || typeof json !== 'string' || !json.includes('TS/V2')) return;
+    try {
+      const obj = JSON.parse(json);
+      const interval = obj.payload?.interval;
+      const requestId = obj.request_id ?? obj.requestId;
+      if (obj.command === 'TS/V2' && interval != null && requestId != null) {
+        this.reqInterval.set(String(requestId), interval);
+      }
+    } catch { /* ignore */ }
+  }
+
+  noteBinary(buf) {
+    const fr = parseFrame(buf);
+    if (!fr || fr.cmd !== 'TS/V2') return 0;
+    let msg;
+    try { msg = this.OHLC.decode(fr.body); } catch {
+      return 0;
+    }
+    const obj = this.OHLC.toObject(msg, { longs: Number, defaults: false });
+    const bars = flattenOhlc(obj);
+    const interval = this.reqInterval.get(fr.cursor) || this.reqInterval.get(fr.requestId);
+    if (!interval || !bars.length) return bars.length;
+    this.merge(interval, bars);
+    return bars.length;
+  }
+
+  merge(interval, bars) {
+    if (!this.bars.has(interval)) this.bars.set(interval, new Map());
+    const m = this.bars.get(interval);
+    for (const b of bars) {
+      if (b?.time) m.set(b.time, b);
+    }
+  }
+
+  getBars(interval) {
+    return [...(this.bars.get(interval)?.values() || [])];
+  }
+}
+
 function parseFrame(buf) {
   if (!buf || buf.length < 6) return null;
   let data = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
@@ -120,12 +234,22 @@ function summarizeCandle(candle) {
   let maxSell = 0;
   let maxBuyLevel = '';
   let maxSellLevel = '';
+  let fpHigh = -Infinity;
+  let fpLow = Infinity;
   for (const l of levels) {
     const b = num(l.buy?.volume);
     const s = num(l.sell?.volume);
-    if (b > maxBuy) { maxBuy = b; maxBuyLevel = num(l.level); }
-    if (s > maxSell) { maxSell = s; maxSellLevel = num(l.level); }
+    const px = num(l.level);
+    if (b > maxBuy) { maxBuy = b; maxBuyLevel = px; }
+    if (s > maxSell) { maxSell = s; maxSellLevel = px; }
+    if (b + s > 0) {
+      if (px > fpHigh) fpHigh = px;
+      if (px < fpLow) fpLow = px;
+    }
   }
+  const es = candle.endingSummary || candle.ending_summary || {};
+  const esHigh = num(es.high);
+  const esLow = num(es.low);
   const serverBuy = num(candle.max?.buy?.volume);
   const serverSell = num(candle.max?.sell?.volume);
   return {
@@ -140,6 +264,8 @@ function summarizeCandle(candle) {
     max_vol_b_level: maxBuyLevel,
     max_vol_s_level: maxSellLevel,
     values_match: serverBuy === maxBuy && serverSell === maxSell,
+    fp_high: esHigh || (Number.isFinite(fpHigh) ? fpHigh : ''),
+    fp_low: esLow || (Number.isFinite(fpLow) ? fpLow : ''),
   };
 }
 
@@ -220,12 +346,14 @@ function buildWsUrl(idToken) {
 }
 
 class FootprintClient {
-  constructor(FP) {
+  constructor(FP, OHLC, ohlcCollector) {
     this.FP = FP;
+    this.OHLC = OHLC;
+    this.ohlcCollector = ohlcCollector;
     this.wsUrl = '';
     this.ws = null;
     this.nextId = 9000;
-    this.pending = new Map(); // requestId -> { interval, candles, extra, resolve, timer, quiet }
+    this.pending = new Map(); // requestId -> { kind, interval, candles/bars, extra, resolve, timer, quiet }
     this.nativeIntervals = new Set();
   }
 
@@ -279,6 +407,7 @@ class FootprintClient {
 
   send(obj) {
     const json = JSON.stringify(obj);
+    this.ohlcCollector?.noteSent(json);
     dbg({ ev: 'poc-send', json: redact(json) });
     this.ws.send(json);
   }
@@ -318,10 +447,20 @@ class FootprintClient {
   handleBinary(buf) {
     const fr = parseFrame(buf);
     if (!fr) {
-      dbg({ ev: 'poc-unparsed', len: buf.length, b0: buf[0] });
+      const utf8 = buf.toString('utf8');
+      dbg({
+        ev: 'poc-unparsed',
+        len: buf.length,
+        b0: buf[0],
+        utf8: redact(utf8).slice(0, 200),
+      });
       return;
     }
     dbg({ ev: 'poc-frame', cmd: fr.cmd, cursor: fr.cursor, requestId: fr.requestId, body: fr.body.length });
+    if (fr.cmd === 'TS/V2') {
+      this.handleOhlcFrame(fr);
+      return;
+    }
     if (fr.cmd !== 'FOOTPRINT/V2') return;
 
     let msg;
@@ -360,12 +499,52 @@ class FootprintClient {
     p.quiet = setTimeout(() => this.finish(fr.requestId), 1200);
   }
 
+  handleOhlcFrame(fr) {
+    let msg;
+    try { msg = this.OHLC.decode(fr.body); } catch (e) {
+      dbg({ ev: 'ohlc-decode-err', err: e.message, requestId: fr.requestId, cursor: fr.cursor, body: fr.body.length });
+      return;
+    }
+    const obj = this.OHLC.toObject(msg, { longs: Number, defaults: false });
+    const bars = flattenOhlc(obj);
+    dbg({
+      ev: 'ohlc',
+      requestId: fr.requestId,
+      cursor: fr.cursor,
+      zone: obj.zone,
+      count: obj.count,
+      offsetIn: obj.offsetIn || obj.offset_in,
+      bars: bars.length,
+      last: bars.length ? bars.reduce((a, b) => (a.time > b.time ? a : b)).time : null,
+    });
+
+    // TS/V2 headers are "TS/V2~<request_id>~<page>"; FOOTPRINT uses request_id in the 3rd slot.
+    const p = this.pending.get(fr.cursor) || this.pending.get(fr.requestId);
+    const interval = (p && p.kind === 'ohlc' && p.interval)
+      || this.ohlcCollector?.reqInterval.get(fr.cursor)
+      || this.ohlcCollector?.reqInterval.get(fr.requestId);
+    if (interval && this.ohlcCollector) this.ohlcCollector.merge(interval, bars);
+    if (!p || p.kind !== 'ohlc') return;
+    p.bars.push(...bars);
+    if (p.quiet) clearTimeout(p.quiet);
+    p.quiet = setTimeout(() => this.finish(p.id), 1200);
+  }
+
   finish(requestId) {
     const p = this.pending.get(requestId);
     if (!p) return;
     clearTimeout(p.timer);
     if (p.quiet) clearTimeout(p.quiet);
     this.pending.delete(requestId);
+    if (p.kind === 'ohlc') {
+      p.resolve({
+        ok: p.bars.length > 0,
+        interval: p.interval,
+        bars: dedupeOhlcBars(p.bars),
+        error: p.extra.error || (p.bars.length ? '' : 'no ohlc bars'),
+      });
+      return;
+    }
     p.resolve({
       ok: p.candles.length > 0,
       interval: p.interval,
@@ -382,6 +561,8 @@ class FootprintClient {
         this.finish(String(request_id));
       }, timeoutMs);
       this.pending.set(String(request_id), {
+        id: String(request_id),
+        kind: 'footprint',
         interval,
         candles: [],
         extra: {},
@@ -413,6 +594,40 @@ class FootprintClient {
     }
     return last;
   }
+
+  requestOhlc(interval, timeoutMs = 12_000) {
+    const request_id = this.nextId++;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (!this.pending.has(String(request_id))) return;
+        this.finish(String(request_id));
+      }, timeoutMs);
+      this.pending.set(String(request_id), {
+        id: String(request_id),
+        kind: 'ohlc',
+        interval,
+        bars: [],
+        extra: {},
+        resolve,
+        timer,
+        quiet: null,
+      });
+      this.send({
+        request_id,
+        command: 'TS/V2',
+        action: 'add',
+        payload: {
+          msg_type: 'OHLCV/V2',
+          symbol: `${SYMBOL.exchange}:${SYMBOL.segment}:${SYMBOL.symbol}`,
+          interval,
+          session: SESSION,
+          // Official client always sends these; without them the server ignores the add.
+          hint: 'rows=500',
+          idxs: [Math.max(0, INTERVALS.indexOf(interval))],
+        },
+      });
+    });
+  }
 }
 
 function writeHeader(stream) {
@@ -423,6 +638,11 @@ function writeHeader(stream) {
     'interval',
     'symbol',
     'candle_time',
+    'open',
+    'high',
+    'low',
+    'close',
+    'ohlc_volume',
     'max_vol_b',
     'max_vol_s',
     'max_vol_b_level',
@@ -442,7 +662,8 @@ function writeHeader(stream) {
 function writeRow(stream, row) {
   const cols = [
     row.sampled_at_utc, row.sampled_at_ist, row.sample_n, row.interval, row.symbol,
-    row.candle_time, row.max_vol_b, row.max_vol_s, row.max_vol_b_level, row.max_vol_s_level,
+    row.candle_time, row.open, row.high, row.low, row.close, row.ohlc_volume,
+    row.max_vol_b, row.max_vol_s, row.max_vol_b_level, row.max_vol_s_level,
     row.totals_buy, row.totals_sell, row.price_levels, row.recomputed_max_b, row.recomputed_max_s,
     row.values_match, row.candles_in_response, row.ok, row.error,
   ];
@@ -451,15 +672,19 @@ function writeRow(stream, row) {
 
 async function main() {
   const protoPath = path.join(__dirname, 'evidence', 'footprint.proto');
+  const ohlcProtoPath = path.join(__dirname, 'evidence', 'ohlc_bars.proto');
   const root = await protobuf.load(protoPath);
+  const ohlcRoot = await protobuf.load(ohlcProtoPath);
   const FP = root.lookupType('fpgc.FootPrintForDateResponse');
+  const OHLC = ohlcRoot.lookupType('protobars.OHLCBarResult');
+  const ohlcCollector = new OhlcCollector(OHLC);
 
   console.log('cognito login (USER_PASSWORD_AUTH, no browser)');
   let session = await cognitoInitiateAuth({ username: email, password });
   dbg({ ev: 'cognito-ok', expiresIn: session.expiresIn, expMs: session.expMs });
   console.log('cognito ok expiresIn=', session.expiresIn, 's');
 
-  const client = new FootprintClient(FP);
+  const client = new FootprintClient(FP, OHLC, ohlcCollector);
   const ensureWs = async (forceRefresh = false) => {
     const remaining = session.expMs - Date.now();
     const tokenStale = remaining < 5 * 60_000;
@@ -510,21 +735,34 @@ async function main() {
         await ensureWs(false);
       }
 
-      const results = await Promise.all(INTERVALS.map((iv) => client.requestInterval(iv, dates)));
-      for (const [i, res] of results.entries()) {
-        const interval = INTERVALS[i];
+      const results = await Promise.all(INTERVALS.map(async (iv) => {
+        const [fp, ohlc] = await Promise.all([
+          client.requestInterval(iv, dates),
+          client.requestOhlc(iv),
+        ]);
+        return { interval: iv, fp, ohlc };
+      }));
+      for (const { interval, fp: res, ohlc } of results) {
+        const ohlcBars = dedupeOhlcBars([...(ohlc?.bars || []), ...ohlcCollector.getBars(interval)]);
         if (LAST_N > 0) {
           const slice = lastNCandles(res.candles, LAST_N);
           console.log(`  ${interval} last ${slice.length}/${res.candles?.length || 0}:`);
           for (const c of slice) {
             const s = summarizeCandle(c);
+            const bar = findOhlcBar(ohlcBars, s.candle_time);
             console.log(
-              `    ${s.candle_time}  MaxVolB=${s.max_vol_b} MaxVolS=${s.max_vol_s} totals=${s.totals_buy}/${s.totals_sell} levels=${s.price_levels} match=${s.values_match}`,
+              `    ${s.candle_time}  OHLC=${fmtOhlc(bar)}  MaxVolB=${s.max_vol_b} MaxVolS=${s.max_vol_s} totals=${s.totals_buy}/${s.totals_sell} levels=${s.price_levels} match=${s.values_match}`,
             );
           }
         }
         const candle = latestCandle(res.candles);
         const stats = candle ? summarizeCandle(candle) : {};
+        const bar = candle ? findOhlcBar(ohlcBars, stats.candle_time) : null;
+        if (candle && !bar) {
+          dbg({ ev: 'ohlc-miss', interval, candle_time: stats.candle_time, nBars: ohlcBars.length, ohlcErr: ohlc?.error || '' });
+        }
+        const high = bar ? bar.high : (candle ? stats.fp_high : '');
+        const low = bar ? bar.low : (candle ? stats.fp_low : '');
         const row = {
           sampled_at_utc,
           sampled_at_ist,
@@ -532,6 +770,11 @@ async function main() {
           interval,
           symbol: `${SYMBOL.exchange}:${SYMBOL.segment}:${SYMBOL.symbol}`,
           candle_time: stats.candle_time || '',
+          open: bar ? bar.open : '',
+          high: high ?? '',
+          low: low ?? '',
+          close: bar ? bar.close : '',
+          ohlc_volume: bar ? bar.volume : '',
           max_vol_b: candle ? stats.max_vol_b : '',
           max_vol_s: candle ? stats.max_vol_s : '',
           max_vol_b_level: candle ? stats.max_vol_b_level : '',
@@ -548,7 +791,7 @@ async function main() {
         };
         writeRow(csv, row);
         console.log(
-          `  ${interval}: ok=${row.ok} candle=${row.candle_time || '-'}  MaxVolB=${row.max_vol_b} MaxVolS=${row.max_vol_s} match=${row.values_match} n=${row.candles_in_response} ${row.error}`,
+          `  ${interval}: ok=${row.ok} candle=${row.candle_time || '-'}  OHLC=${row.open || '-'}/${row.high || '-'}/${row.low || '-'}/${row.close || '-'} MaxVolB=${row.max_vol_b} MaxVolS=${row.max_vol_s} match=${row.values_match} n=${row.candles_in_response} ${row.error}`,
         );
       }
     }
