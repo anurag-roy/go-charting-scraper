@@ -1,12 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  footprintMetrics,
-  oiFields,
-  previousOhlcBar,
-  typicalPrice,
-  vwapByCandleTime,
-} from './footprint-metrics.js';
+import { footprintMetrics, oiFields, previousOhlcBar } from './footprint-metrics.js';
 
 describe('footprintMetrics', () => {
   const candle = {
@@ -44,6 +38,8 @@ describe('footprintMetrics', () => {
     assert.equal(m.poc, 100);
     assert.equal(m.poc_volume, 80);
     assert.equal(m.values_match, true);
+    // (99*15 + 100*80 + 101*55) / 150
+    assert.equal(m.vwap, 100.27);
   });
 
   it('falls back to buy minus sell when close_delta is missing', () => {
@@ -96,35 +92,19 @@ describe('oiFields', () => {
   });
 });
 
-describe('vwapByCandleTime', () => {
-  it('uses typical price (H+L+C)/3', () => {
-    assert.equal(typicalPrice({ high: 12, low: 6, close: 9 }), 9);
-  });
-
-  it('accumulates session VWAP and resets on a new IST date', () => {
-    const map = vwapByCandleTime([
-      { time: '2026-08-17T09:15:00+05:30', high: 10, low: 8, close: 9, volume: 100 },
-      { time: '2026-08-17T09:20:00+05:30', high: 12, low: 10, close: 11, volume: 100 },
-      { time: '2026-08-18T09:15:00+05:30', high: 20, low: 20, close: 20, volume: 50 },
-    ]);
-    assert.equal(map.get('2026-08-17T09:15:00+05:30'), 9);
-    assert.equal(map.get('2026-08-17T09:20:00+05:30'), 10);
-    assert.equal(map.get('2026-08-18T09:15:00+05:30'), 20);
-  });
-
-  it('skips zero-volume bars without resetting the session average', () => {
-    const map = vwapByCandleTime([
-      { time: '2026-08-17T09:15:00+05:30', high: 10, low: 8, close: 9, volume: 100 },
-      { time: '2026-08-17T09:20:00+05:30', high: 99, low: 99, close: 99, volume: 0 },
-    ]);
-    assert.equal(map.get('2026-08-17T09:15:00+05:30'), 9);
-    assert.equal(map.get('2026-08-17T09:20:00+05:30'), 9);
-  });
-
-  it('rounds VWAP to two decimals', () => {
-    const map = vwapByCandleTime([
-      { time: '2026-08-17T09:15:00+05:30', high: 10, low: 8, close: 9.5, volume: 100 },
-    ]);
-    assert.equal(map.get('2026-08-17T09:15:00+05:30'), 9.17);
+describe('per-bar VWAP', () => {
+  it('volume-weights footprint price levels and rounds ticks/100 like the chart', () => {
+    const m = footprintMetrics({
+      date: '2026-08-17T15:35:00+05:30',
+      totals: { overall: { volume: 200 } },
+      max: { buy: { volume: 1 }, sell: { volume: 1 } },
+      footprint: [
+        { level: 7873, buy: { volume: 80 }, sell: { volume: 70 } },
+        { level: 7800, buy: { volume: 20 }, sell: { volume: 30 } },
+      ],
+    });
+    // (7873*150 + 7800*50) / 200 = 7854.75
+    assert.equal(m.vwap, 7854.75);
+    assert.equal(Math.round(m.vwap / 100), 79);
   });
 });

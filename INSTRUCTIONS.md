@@ -44,7 +44,7 @@ The live scraper is `investigation/poc-log-maxvol.js`.
 
 It signs in with AWS Cognito over HTTPS (no browser), then requests footprint
 **and OHLC** data for **2m**, **3m**, and **5m** candles of
-`NSE:FUTURE:NIFTY-I` and writes every **closed** bar in the **09:15–15:30 IST**
+`NSE:FUTURE:NIFTY-I` and writes every **closed** bar in the **09:15–15:40 IST**
 session:
 
 | Field | Meaning |
@@ -57,7 +57,7 @@ session:
 | **POC** | Point of control: price level with the most total (buy+sell) volume |
 | **Volume** | Footprint total volume (`totals.overall`, else buy+sell) |
 | **OI change** | This bar’s open interest minus the previous bar’s (`TS/V2` `oi`) |
-| **VWAP** | Session volume-weighted average from typical price `(H+L+C)/3`, reset each IST day |
+| **VWAP** | Per-bar volume-weighted average of footprint price levels (same as GoCharting bar statistics). Stored in ticks. |
 
 The in-progress (forming) candle is **not** written. After a bar's end time the
 scraper waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the print,
@@ -65,7 +65,7 @@ then appends the row. Restarts skip candles already stored (by `interval` +
 `candle_time`).
 
 Default behaviour: on a weekday during market hours, sample every **15 seconds**
-until shortly after **15:30 IST**. `RUN_MS=0` is a one-shot backfill (cron-friendly).
+until shortly after **15:40 IST**. `RUN_MS=0` is a one-shot backfill (cron-friendly).
 Weekends backfill the last weekday session and exit.
 
 At least one sink is required:
@@ -97,9 +97,9 @@ choices (outbound hosts, secrets) make sense.
    `investigation/evidence/footprint.proto` and
    `investigation/evidence/ohlc_bars.proto`.
 6. For each interval it keeps every **closed** candle whose open time is in the
-   09:15–15:30 IST window for the current (or last weekday) session, and writes
+   09:15–15:40 IST window for the current (or last weekday) session, and writes
    OHLC, delta / max delta, Max Vol B/S, POC, footprint volume, OI change, and
-   session VWAP to Google Sheets and/or CSV.
+   per-bar VWAP to Google Sheets and/or CSV.
 7. It also recomputes `max(level.buy.volume)` / `max(level.sell.volume)` and
    records `values_match=true` when they agree with the server. OHLC bars are
    matched to the footprint candle by timestamp (`start + offset` minutes).
@@ -158,11 +158,12 @@ Optional:
 
 ### Market hours (so “empty” values make sense)
 
-NSE / Nifty futures **RTH** is **09:15–15:30 IST**, Monday–Friday. The scraper
-only persists candles that open in that window. A 2-minute last bar may be
-shorter than 2 minutes (session length is 375 minutes); it is treated as closed
-at 15:30. After the close, or on a weekend, a one-shot run backfills the last
-completed session. That is real data, not a scraper bug.
+NSE / Nifty futures **RTH** is **09:15–15:40 IST**, Monday–Friday. The scraper
+only persists candles that open in that window. Last bars: **5m 15:35**,
+**3m 15:39**, **2m 15:39**. A 2-minute last bar may be shorter than 2 minutes
+(session length is 385 minutes); it is treated as closed at 15:40. After the
+close, or on a weekend, a one-shot run backfills the last completed session.
+That is real data, not a scraper bug.
 
 ---
 
@@ -342,13 +343,13 @@ RUN_MS=0 WRITE_CSV=1 node poc-log-maxvol.js
 
 `RUN_MS=0` means “take one sample and exit” (Cognito + one `FOOTPRINT/V2` /
 `TS/V2` round-trip per interval). Omit `RUN_MS` on a weekday to poll until
-15:30 IST.
+15:40 IST.
 
 ### Success looks like
 
 ```text
 cognito login (USER_PASSWORD_AUTH, no browser)
-symbol NSE:FUTURE:NIFTY-I intervals 2m, 3m, 5m session 09:15–15:30 IST
+symbol NSE:FUTURE:NIFTY-I intervals 2m, 3m, 5m session 09:15–15:40 IST
 ws wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws
 outputs { csv: '.../maxvol.csv', sheet: false }
 cognito ok expiresIn= 28800 s
@@ -395,9 +396,9 @@ is optional. Copy [`.env.example`](.env.example).
 | `GOCHARTING_SEGMENT` | `FUTURE` | Footprint segment |
 | `GOCHARTING_SYMBOL` | `NIFTY-I` | Current-month Nifty futures continuous contract |
 | `INTERVALS` | `2m,3m,5m` | Comma-separated GoCharting interval strings |
-| `MARKET_OPEN` / `MARKET_CLOSE` | `09:15` / `15:30` | IST session used to keep / close bars |
+| `MARKET_OPEN` / `MARKET_CLOSE` | `09:15` / `15:40` | IST session used to keep / close bars |
 | `CLOSE_GRACE_MS` | `2000` | Wait after a bar’s end before treating it as closed |
-| `RUN_MS` | *(unset = until close)* | Sampling window in ms. `0` = one shot. Omit to poll until 15:30 IST. |
+| `RUN_MS` | *(unset = until close)* | Sampling window in ms. `0` = one shot. Omit to poll until 15:40 IST. |
 | `SAMPLE_MS` | `15000` | Delay between samples |
 | `TOKEN_REFRESH_MS` | `2700000` (45 min) | Refresh Cognito JWT and reconnect the WebSocket |
 | `LAST_N` | `0` (off) | If `> 0`, print the last N candles per interval to stdout |
@@ -459,7 +460,7 @@ safe to re-run.
 | `volume` | Footprint candle volume (`totals.overall.volume`, else buy+sell) |
 | `oi` | Open interest at the end of the matching OHLC bar |
 | `oi_change` | `oi` minus the previous OHLC bar’s `oi` (empty on the first bar in the response) |
-| `vwap` | Session VWAP from typical price `(H+L+C)/3` × volume, reset each IST session date. After-hours bars are excluded. |
+| `vwap` | Per-bar VWAP from footprint levels: `sum(price × volume) / sum(volume)`. Same as GoCharting bar statistics. Ticks (chart shows `round(ticks/100)` rupees). |
 
 Price `level` values are **integer ticks** as sent by the feed.
 
@@ -487,7 +488,7 @@ Sheets use a slim schema (CSV keeps the wider debug columns):
 | `poc` | Point of control (price tick with most buy+sell volume) |
 | `volume` | Footprint candle volume |
 | `oi_change` | Change in open interest vs the previous OHLC bar |
-| `vwap` | Session VWAP from typical price `(H+L+C)/3` × volume |
+| `vwap` | Per-bar footprint VWAP in ticks (chart bar stats show `round(ticks/100)`) |
 
 ### One-time Google Cloud setup
 
@@ -530,7 +531,7 @@ RUN_MS=0 WRITE_CSV=1 LAST_N=5 node poc-log-maxvol.js
 
 CSV/Sheets still store **closed** bars only.
 
-### Live session (poll until 15:30 IST)
+### Live session (poll until 15:40 IST)
 
 ```bash
 WRITE_CSV=1 node poc-log-maxvol.js
@@ -609,7 +610,7 @@ With `WRITE_CSV=1` and `CSV_PATH=/var/lib/gocharting/maxvol.csv` each shot
 
 ### 14.3 systemd — long-running process
 
-Omit `RUN_MS` so the process polls until 15:30 IST. It refreshes the JWT
+Omit `RUN_MS` so the process polls until 15:40 IST. It refreshes the JWT
 about every 45 minutes. Use `Restart=on-failure` with `RestartSec=30`.
 
 A weekday timer that starts the service at 09:10 IST is simpler than
@@ -722,7 +723,7 @@ Notes:
 | `cognito extra challenge` | MFA / extra Cognito step | This client only supports `USER_PASSWORD_AUTH` with no challenge. |
 | `ws unexpected HTTP 401` / `poc ws connect timeout` | JWT rejected or WSS blocked | Confirm egress to `origin.ws.prodb.blr1.gocharting.com`. Check `OUT_DIR/debug.jsonl` for `poc-ws-open` / `poc-ws-unexpected`. |
 | `cognito ok` but `closed=0` / `no candles` | Weekend/holiday, wrong symbol, or before first bar | Check `OUT_DIR/debug.jsonl` for `poc-ws-open`, `footprint`, `decode-err`. Confirm `NSE:FUTURE:NIFTY-I` is the instrument string your account sees. |
-| No new rows near 15:30 IST | Last bars not closed yet | Wait until 15:30 + `CLOSE_GRACE_MS`, or run `RUN_MS=0` after the close. |
+| No new rows near 15:40 IST | Last bars not closed yet | Wait until 15:40 + `CLOSE_GRACE_MS`, or run `RUN_MS=0` after the close. |
 | `values_match=false` | Decoder/schema drift | Re-fetch `footprint.proto` from `https://gocharting.com/assets/proto/1.1/footprint.proto` into `evidence/`. Open an issue with a redacted debug line. |
 | Empty `open` / `close` | `TS/V2` OHLC bar not matched | Check `OUT_DIR/debug.jsonl` for `ohlc`, `ohlc-miss`, `ohlc-decode-err`. Re-fetch `ohlc_bars.proto`. `high`/`low` may still come from the footprint `ending_summary`. |
 | CSV missing / empty | `WRITE_CSV` unset, wrong cwd, or path not writable | Set `WRITE_CSV=1`. Run from `investigation/`, or set an absolute `CSV_PATH`. |

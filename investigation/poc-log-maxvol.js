@@ -1,6 +1,6 @@
 // Live scraper: persist closed 2m / 3m / 5m footprint candles (OHLC, delta,
-// max delta, Max Vol B/S, POC, volume, OI change, session VWAP) for NSE Nifty
-// during the 09:15–15:30 IST cash session.
+// max delta, Max Vol B/S, POC, volume, OI change, per-bar VWAP) for NSE Nifty
+// during the 09:15–15:40 IST session.
 //
 // Auth is AWS Cognito USER_PASSWORD_AUTH (same public client id the website
 // uses). No browser is required. Intervals are requested over the market-data
@@ -21,7 +21,6 @@ import { symbolId } from './lib/columns.js';
 import {
   footprintMetrics,
   oiFields,
-  vwapByCandleTime,
 } from './lib/footprint-metrics.js';
 import {
   formatIst,
@@ -588,7 +587,7 @@ function shouldStop(startedAt) {
 }
 
 function candleToRow({
-  interval, candle, ohlcBars, vwapMap, sampled_at_utc, sampled_at_ist, sample_n, candlesInResponse, error,
+  interval, candle, ohlcBars, sampled_at_utc, sampled_at_ist, sample_n, candlesInResponse, error,
 }) {
   const stats = candle ? summarizeCandle(candle) : {};
   const bar = candle ? findOhlcBar(ohlcBars, stats.candle_time) : null;
@@ -598,7 +597,6 @@ function candleToRow({
   const high = bar ? bar.high : (candle ? stats.fp_high : '');
   const low = bar ? bar.low : (candle ? stats.fp_low : '');
   const oi = bar ? oiFields(bar, ohlcBars) : { oi: '', oi_change: '' };
-  const vwap = bar && vwapMap ? (vwapMap.get(bar.time) ?? '') : '';
   return {
     sampled_at_utc,
     sampled_at_ist,
@@ -632,7 +630,7 @@ function candleToRow({
     volume: candle ? stats.volume : '',
     oi: oi.oi,
     oi_change: oi.oi_change,
-    vwap,
+    vwap: candle ? stats.vwap : '',
   };
 }
 
@@ -759,8 +757,6 @@ async function main() {
       const closedRows = [];
       for (const { interval, fp: res, ohlc } of results) {
         const ohlcBars = dedupeOhlcBars([...(ohlc?.bars || []), ...ohlcCollector.getBars(interval)]);
-        const sessionBars = ohlcBars.filter((b) => inSession(b.time, sessionOpts));
-        const vwapMap = vwapByCandleTime(sessionBars);
         const candles = res.candles || [];
         if (LAST_N > 0) {
           const slice = lastNCandles(candles, LAST_N);
@@ -768,9 +764,8 @@ async function main() {
           for (const c of slice) {
             const s = summarizeCandle(c);
             const bar = findOhlcBar(ohlcBars, s.candle_time);
-            const vwap = bar ? (vwapMap.get(bar.time) ?? '') : '';
             console.log(
-              `    ${s.candle_time}  OHLC=${fmtOhlc(bar)}  Δ=${s.delta} maxΔ=${s.max_delta} MaxVolB=${s.max_vol_b} MaxVolS=${s.max_vol_s} POC=${s.poc} vol=${s.volume} VWAP=${vwap} match=${s.values_match}`,
+              `    ${s.candle_time}  OHLC=${fmtOhlc(bar)}  Δ=${s.delta} maxΔ=${s.max_delta} MaxVolB=${s.max_vol_b} MaxVolS=${s.max_vol_s} POC=${s.poc} vol=${s.volume} VWAP=${s.vwap} match=${s.values_match}`,
             );
           }
         }
@@ -785,7 +780,6 @@ async function main() {
             interval,
             candle,
             ohlcBars,
-            vwapMap,
             sampled_at_utc,
             sampled_at_ist,
             sample_n: sampleN,
@@ -806,9 +800,8 @@ async function main() {
           const lastClosed = closed[closed.length - 1];
           const stats = summarizeCandle(lastClosed);
           const bar = findOhlcBar(ohlcBars, stats.candle_time);
-          const vwap = bar ? (vwapMap.get(bar.time) ?? '') : '';
           console.log(
-            `    last closed ${stats.candle_time}  OHLC=${fmtOhlc(bar)}  Δ=${stats.delta} maxΔ=${stats.max_delta} MaxVolB=${stats.max_vol_b} MaxVolS=${stats.max_vol_s} POC=${stats.poc} vol=${stats.volume} VWAP=${vwap} match=${stats.values_match}`,
+            `    last closed ${stats.candle_time}  OHLC=${fmtOhlc(bar)}  Δ=${stats.delta} maxΔ=${stats.max_delta} MaxVolB=${stats.max_vol_b} MaxVolS=${stats.max_vol_s} POC=${stats.poc} vol=${stats.volume} VWAP=${stats.vwap} match=${stats.values_match}`,
           );
         }
       }

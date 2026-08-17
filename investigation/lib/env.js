@@ -75,7 +75,7 @@ export function loadConfig() {
     session: process.env.GOCHARTING_SESSION || 'RTH',
     intervals,
     marketOpen: process.env.MARKET_OPEN || '09:15',
-    marketClose: process.env.MARKET_CLOSE || '15:30',
+    marketClose: process.env.MARKET_CLOSE || '15:40',
     closeGraceMs: Number(process.env.CLOSE_GRACE_MS || 2000),
     runMs,
     sampleMs: Number(process.env.SAMPLE_MS || 15_000),

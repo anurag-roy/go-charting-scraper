@@ -15,7 +15,7 @@ import { parseSheetId } from './env.js';
 import { COLUMNS, parseCsvLine, rowToCsvLine, selectNewRows, rowKey } from './columns.js';
 import { sheetA1 } from './sheets-sink.js';
 
-const SESSION = { open: '09:15', close: '15:30', graceMs: 2000 };
+const SESSION = { open: '09:15', close: '15:40', graceMs: 2000 };
 
 describe('intervalMinutes', () => {
   it('parses 2m/3m/5m', () => {
@@ -26,11 +26,14 @@ describe('intervalMinutes', () => {
 });
 
 describe('NSE session window', () => {
-  it('includes 09:15 and excludes 15:30 starts', () => {
+  it('includes 09:15 through 15:39 and excludes 15:40 starts', () => {
     assert.equal(inSession('2026-08-14T09:15:00+05:30', SESSION), true);
     assert.equal(inSession('2026-08-14T15:25:00+05:30', SESSION), true);
     assert.equal(inSession('2026-08-14T15:29:00+05:30', SESSION), true);
-    assert.equal(inSession('2026-08-14T15:30:00+05:30', SESSION), false);
+    assert.equal(inSession('2026-08-14T15:30:00+05:30', SESSION), true);
+    assert.equal(inSession('2026-08-14T15:35:00+05:30', SESSION), true);
+    assert.equal(inSession('2026-08-14T15:39:00+05:30', SESSION), true);
+    assert.equal(inSession('2026-08-14T15:40:00+05:30', SESSION), false);
     assert.equal(inSession('2026-08-14T09:14:00+05:30', SESSION), false);
   });
 
@@ -41,16 +44,16 @@ describe('NSE session window', () => {
     assert.equal(isCandleClosed(candle, '5m', close + 2000, SESSION), true);
   });
 
-  it('closes the last 5m bar (15:25) at 15:30 plus grace', () => {
-    const candle = '2026-08-14T15:25:00+05:30';
-    const close = Date.parse('2026-08-14T15:30:00+05:30');
+  it('closes the last 5m bar (15:35) at 15:40 plus grace', () => {
+    const candle = '2026-08-14T15:35:00+05:30';
+    const close = Date.parse('2026-08-14T15:40:00+05:30');
     assert.equal(isCandleClosed(candle, '5m', close + 1000, SESSION), false);
     assert.equal(isCandleClosed(candle, '5m', close + 2000, SESSION), true);
   });
 
-  it('caps a short last 2m bar at the 15:30 session close', () => {
-    const candle = '2026-08-14T15:29:00+05:30';
-    const close = Date.parse('2026-08-14T15:30:00+05:30');
+  it('caps a short last 2m bar at the 15:40 session close', () => {
+    const candle = '2026-08-14T15:39:00+05:30';
+    const close = Date.parse('2026-08-14T15:40:00+05:30');
     assert.equal(isCandleClosed(candle, '2m', close + 2000, SESSION), true);
     assert.equal(isCandleClosed(candle, '2m', close + 1000, SESSION), false);
   });
@@ -64,7 +67,7 @@ describe('NSE session window', () => {
   it('detects before-open and after-close in IST', () => {
     const before = Date.parse('2026-08-14T09:14:59+05:30');
     const open = Date.parse('2026-08-14T09:15:00+05:30');
-    const close = Date.parse('2026-08-14T15:30:00+05:30');
+    const close = Date.parse('2026-08-14T15:40:00+05:30');
     assert.equal(isBeforeOpen(before, SESSION), true);
     assert.equal(isBeforeOpen(open, SESSION), false);
     assert.equal(isAfterClose(close - 1, SESSION), false);
@@ -99,9 +102,9 @@ describe('NSE session window', () => {
     assert.equal(isPersistableCandle('2026-08-13T09:15:00+05:30', now, SESSION), false);
   });
 
-  it('computes a 375-minute cash session', () => {
-    const { openMs, closeMs } = marketWindowMs('2026-08-14', '09:15', '15:30');
-    assert.equal((closeMs - openMs) / 60_000, 375);
+  it('computes a 385-minute cash session', () => {
+    const { openMs, closeMs } = marketWindowMs('2026-08-14', '09:15', '15:40');
+    assert.equal((closeMs - openMs) / 60_000, 385);
   });
 
   it('asks the persist date first when requesting session dates', () => {
