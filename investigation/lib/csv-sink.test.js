@@ -45,4 +45,16 @@ describe('CsvSink', () => {
     const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
     assert.equal(lines.length, 5); // header + 4 unique rows
   });
+
+  it('upgrades a prefix header when new columns are added', async () => {
+    const file = path.join(dir, 'upgrade.csv');
+    const old = COLUMNS.slice(0, 8);
+    fs.writeFileSync(file, `${old.join(',')}\n2m,t-old\n`);
+    const sink = new CsvSink(file);
+    await sink.init();
+    const header = fs.readFileSync(file, 'utf8').split('\n')[0];
+    assert.equal(header, COLUMNS.join(','));
+    const n = sink.writeRows([{ ok: true, interval: '2m', candle_time: 't-new' }]);
+    assert.equal(n, 1);
+  });
 });

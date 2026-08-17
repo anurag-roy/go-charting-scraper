@@ -173,8 +173,9 @@ Scripts:
 - `analyze-ws.js`, `extract.js` — helpers for summarizing frames / grepping bundles.
 - `poc-log-maxvol.js` — live scraper: Cognito HTTPS login (no browser), then
   request `2m` / `3m` / `5m` `FOOTPRINT/V2` and `TS/V2` `OHLCV/V2` for closed
-  NSE Nifty session candles and append OHLC + Max Vol B/S to Google Sheets
-  and/or CSV. See `.env.example`.
+  NSE Nifty session candles and append OHLC, delta / max delta, Max Vol B/S,
+  point of control, volume, and OI change to Google Sheets and/or CSV. See
+  `.env.example`.
 
 Full clone-to-deploy steps: [`INSTRUCTIONS.md`](../INSTRUCTIONS.md).
 

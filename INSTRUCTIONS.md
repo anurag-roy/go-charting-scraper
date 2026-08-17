@@ -50,8 +50,13 @@ session:
 | Field | Meaning |
 | --- | --- |
 | **OHLC** | Open / high / low / close of that candle (`TS/V2` `OHLCV/V2` bars) |
-| **Max Vol B** | Largest **buy** volume at any single price level in that candle (`max.buy.volume`) |
-| **Max Vol S** | Largest **sell** volume at any single price level in that candle (`max.sell.volume`) |
+| **Delta** | Buy volume minus sell volume for the candle (`ending_summary.close_delta`) |
+| **Max Delta** | Highest intra-bar cumulative delta (`ending_summary.max_delta`) |
+| **Max Vol B** | Largest **buy** volume at any single price level (`max.buy.volume`) |
+| **Max Vol S** | Largest **sell** volume at any single price level (`max.sell.volume`) |
+| **POC** | Point of control: price level with the most total (buy+sell) volume |
+| **Volume** | Footprint total volume (`totals.overall`, else buy+sell) |
+| **OI change** | This bar’s open interest minus the previous bar’s (`TS/V2` `oi`) |
 
 The in-progress (forming) candle is **not** written. After a bar's end time the
 scraper waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the print,
@@ -92,7 +97,8 @@ choices (outbound hosts, secrets) make sense.
    `investigation/evidence/ohlc_bars.proto`.
 6. For each interval it keeps every **closed** candle whose open time is in the
    09:15–15:30 IST window for the current (or last weekday) session, and writes
-   OHLC plus `max.buy.volume` / `max.sell.volume` to Google Sheets and/or CSV.
+   OHLC, delta / max delta, Max Vol B/S, POC, footprint volume, and OI change
+   to Google Sheets and/or CSV.
 7. It also recomputes `max(level.buy.volume)` / `max(level.sell.volume)` and
    records `values_match=true` when they agree with the server. OHLC bars are
    matched to the footprint candle by timestamp (`start + offset` minutes).
@@ -434,8 +440,8 @@ safe to re-run.
 | `candle_time` | Footprint candle open time (`FootPrintCandle.date`) |
 | `open` / `high` / `low` / `close` | OHLC of that candle from `TS/V2` `OHLCV/V2` (`protobars.Candle`). Prices are integer ticks, same as `max_vol_*_level`. If the OHLC bar is missing, `high`/`low` fall back to the footprint `ending_summary` (or min/max traded price level). |
 | `ohlc_volume` | Total volume on the OHLC bar (`Candle.volume`). Empty if no matching `TS/V2` bar. |
-| `max_vol_b` | Server **Max Vol B** (`max.buy.volume`) |
-| `max_vol_s` | Server **Max Vol S** (`max.sell.volume`) |
+| `max_vol_b` | Server **Max Buy Volume** (`max.buy.volume`) |
+| `max_vol_s` | Server **Max Sell Volume** (`max.sell.volume`) |
 | `max_vol_b_level` | Price level where recomputed max buy occurred |
 | `max_vol_s_level` | Price level where recomputed max sell occurred |
 | `totals_buy` / `totals_sell` | Sum of buy/sell volume across all levels in the candle |
@@ -445,6 +451,13 @@ safe to re-run.
 | `candles_in_response` | How many candles were in the decoded payload(s) |
 | `ok` | `true` if a closed candle was written |
 | `error` | Empty on success |
+| `delta` | Candle delta = buy volume − sell volume (`ending_summary.close_delta`). Not options-Greeks delta. |
+| `max_delta` / `min_delta` | Intra-bar cumulative-delta high / low (`ending_summary.max_delta` / `min_delta`) |
+| `poc` | Point of control: price tick with the largest buy+sell volume |
+| `poc_volume` | Total volume at the POC |
+| `volume` | Footprint candle volume (`totals.overall.volume`, else buy+sell) |
+| `oi` | Open interest at the end of the matching OHLC bar |
+| `oi_change` | `oi` minus the previous OHLC bar’s `oi` (empty on the first bar in the response) |
 
 Price `level` values are **integer ticks** as sent by the feed.
 

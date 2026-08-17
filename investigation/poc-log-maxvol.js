@@ -1,5 +1,6 @@
-// Live scraper: persist closed 2m / 3m / 5m footprint candles (OHLC + Max Vol B/S)
-// for NSE Nifty futures during the 09:15–15:30 IST cash session.
+// Live scraper: persist closed 2m / 3m / 5m footprint candles (OHLC, delta,
+// max delta, Max Vol B/S, POC, volume, OI change) for NSE Nifty futures
+// during the 09:15–15:30 IST cash session.
 //
 // Auth is AWS Cognito USER_PASSWORD_AUTH (same public client id the website
 // uses). No browser is required. Intervals are requested over the market-data
@@ -17,6 +18,10 @@ import { loadConfig, validateConfig } from './lib/env.js';
 import { CsvSink } from './lib/csv-sink.js';
 import { SheetsSink } from './lib/sheets-sink.js';
 import { symbolId } from './lib/columns.js';
+import {
+  footprintMetrics,
+  oiFields,
+} from './lib/footprint-metrics.js';
 import {
   formatIst,
   inSession,
@@ -262,44 +267,7 @@ function parseFrame(buf) {
 }
 
 function summarizeCandle(candle) {
-  const levels = candle.footprint || [];
-  let maxBuy = 0;
-  let maxSell = 0;
-  let maxBuyLevel = '';
-  let maxSellLevel = '';
-  let fpHigh = -Infinity;
-  let fpLow = Infinity;
-  for (const l of levels) {
-    const b = num(l.buy?.volume);
-    const s = num(l.sell?.volume);
-    const px = num(l.level);
-    if (b > maxBuy) { maxBuy = b; maxBuyLevel = px; }
-    if (s > maxSell) { maxSell = s; maxSellLevel = px; }
-    if (b + s > 0) {
-      if (px > fpHigh) fpHigh = px;
-      if (px < fpLow) fpLow = px;
-    }
-  }
-  const es = candle.endingSummary || candle.ending_summary || {};
-  const esHigh = num(es.high);
-  const esLow = num(es.low);
-  const serverBuy = num(candle.max?.buy?.volume);
-  const serverSell = num(candle.max?.sell?.volume);
-  return {
-    candle_time: candle.date || '',
-    max_vol_b: serverBuy,
-    max_vol_s: serverSell,
-    totals_buy: num(candle.totals?.buy?.volume),
-    totals_sell: num(candle.totals?.sell?.volume),
-    price_levels: levels.length,
-    recomputed_max_b: maxBuy,
-    recomputed_max_s: maxSell,
-    max_vol_b_level: maxBuyLevel,
-    max_vol_s_level: maxSellLevel,
-    values_match: serverBuy === maxBuy && serverSell === maxSell,
-    fp_high: esHigh || (Number.isFinite(fpHigh) ? fpHigh : ''),
-    fp_low: esLow || (Number.isFinite(fpLow) ? fpLow : ''),
-  };
+  return footprintMetrics(candle);
 }
 
 function lastNCandles(candles, n) {
@@ -628,6 +596,7 @@ function candleToRow({
   }
   const high = bar ? bar.high : (candle ? stats.fp_high : '');
   const low = bar ? bar.low : (candle ? stats.fp_low : '');
+  const oi = bar ? oiFields(bar, ohlcBars) : { oi: '', oi_change: '' };
   return {
     sampled_at_utc,
     sampled_at_ist,
@@ -653,6 +622,14 @@ function candleToRow({
     candles_in_response: candlesInResponse,
     ok: Boolean(candle),
     error: candle ? '' : (error || 'no candle'),
+    delta: candle ? stats.delta : '',
+    max_delta: candle ? stats.max_delta : '',
+    min_delta: candle ? stats.min_delta : '',
+    poc: candle ? stats.poc : '',
+    poc_volume: candle ? stats.poc_volume : '',
+    volume: candle ? stats.volume : '',
+    oi: oi.oi,
+    oi_change: oi.oi_change,
   };
 }
 
@@ -787,7 +764,7 @@ async function main() {
             const s = summarizeCandle(c);
             const bar = findOhlcBar(ohlcBars, s.candle_time);
             console.log(
-              `    ${s.candle_time}  OHLC=${fmtOhlc(bar)}  MaxVolB=${s.max_vol_b} MaxVolS=${s.max_vol_s} totals=${s.totals_buy}/${s.totals_sell} levels=${s.price_levels} match=${s.values_match}`,
+              `    ${s.candle_time}  OHLC=${fmtOhlc(bar)}  Δ=${s.delta} maxΔ=${s.max_delta} MaxVolB=${s.max_vol_b} MaxVolS=${s.max_vol_s} POC=${s.poc} vol=${s.volume} match=${s.values_match}`,
             );
           }
         }
@@ -823,7 +800,7 @@ async function main() {
           const stats = summarizeCandle(lastClosed);
           const bar = findOhlcBar(ohlcBars, stats.candle_time);
           console.log(
-            `    last closed ${stats.candle_time}  OHLC=${fmtOhlc(bar)}  MaxVolB=${stats.max_vol_b} MaxVolS=${stats.max_vol_s} match=${stats.values_match}`,
+            `    last closed ${stats.candle_time}  OHLC=${fmtOhlc(bar)}  Δ=${stats.delta} maxΔ=${stats.max_delta} MaxVolB=${stats.max_vol_b} MaxVolS=${stats.max_vol_s} POC=${stats.poc} vol=${stats.volume} match=${stats.values_match}`,
           );
         }
       }

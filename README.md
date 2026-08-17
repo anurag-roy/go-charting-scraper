@@ -34,9 +34,11 @@ schema, and proof.
 (same `USER_PASSWORD_AUTH` flow as the website — **no browser**), opens the
 market-data WebSocket, and persists **OHLC** plus **Max Vol B / Max Vol S** for
 every **closed** `2m`, `3m`, and `5m` candle of `NSE:FUTURE:NIFTY-I` during the
-**09:15–15:30 IST** session. Forming (in-progress) bars are not written. It
-does not click chart/timeframe buttons — intervals are requested as
-`FOOTPRINT/V2` and `TS/V2` `OHLCV/V2`.
+**09:15–15:30 IST** session: OHLC, **delta** (buy − sell volume), **max delta**,
+**Max Vol B / Max Vol S**, **point of control**, footprint **volume**, and **OI
+change**. Forming (in-progress) bars are not written. It does not click
+chart/timeframe buttons — intervals are requested as `FOOTPRINT/V2` and
+`TS/V2` `OHLCV/V2`.
 
 Output is configured in `.env` (see [`.env.example`](.env.example)):
 

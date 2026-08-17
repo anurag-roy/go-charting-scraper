@@ -23,6 +23,15 @@ export const COLUMNS = [
   'candles_in_response',
   'ok',
   'error',
+  // Appended so existing CSV / Sheets rows keep their column positions.
+  'delta',
+  'max_delta',
+  'min_delta',
+  'poc',
+  'poc_volume',
+  'volume',
+  'oi',
+  'oi_change',
 ];
 
 export function rowKey(interval, candleTime) {

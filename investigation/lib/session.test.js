@@ -12,7 +12,7 @@ import {
   sessionDatesFor,
 } from './session.js';
 import { parseSheetId } from './env.js';
-import { parseCsvLine, rowToCsvLine, selectNewRows, rowKey } from './columns.js';
+import { COLUMNS, parseCsvLine, rowToCsvLine, selectNewRows, rowKey } from './columns.js';
 import { sheetA1 } from './sheets-sink.js';
 
 const SESSION = { open: '09:15', close: '15:30', graceMs: 2000 };
@@ -130,9 +130,9 @@ describe('csv helpers', () => {
       error: 'a, b',
     });
     const cols = parseCsvLine(line);
-    assert.equal(cols[3], '2m');
-    assert.equal(cols[5], '2026-08-14T09:15:00+05:30');
-    assert.equal(cols[cols.length - 1], 'a, b');
+    assert.equal(cols[COLUMNS.indexOf('interval')], '2m');
+    assert.equal(cols[COLUMNS.indexOf('candle_time')], '2026-08-14T09:15:00+05:30');
+    assert.equal(cols[COLUMNS.indexOf('error')], 'a, b');
   });
 
   it('selects only new successful closed rows', () => {

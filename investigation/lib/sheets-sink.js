@@ -81,7 +81,7 @@ export class SheetsSink {
   async #ensureHeaderAndLoadKeys(tab) {
     const res = await this.sheetsApi.spreadsheets.values.get({
       spreadsheetId: this.spreadsheetId,
-      range: sheetA1(tab, 'A:Z'),
+      range: sheetA1(tab, 'A:AZ'),
     });
     const values = res.data.values || [];
     if (!values.length) {
@@ -93,7 +93,15 @@ export class SheetsSink {
       });
       return;
     }
-    const header = values[0];
+    const header = values[0] || [];
+    if (header.length < COLUMNS.length && header.every((h, i) => h === COLUMNS[i])) {
+      await this.sheetsApi.spreadsheets.values.update({
+        spreadsheetId: this.spreadsheetId,
+        range: sheetA1(tab, 'A1'),
+        valueInputOption: 'RAW',
+        requestBody: { values: [COLUMNS] },
+      });
+    }
     const iInterval = header.indexOf('interval');
     const iTime = header.indexOf('candle_time');
     for (const row of values.slice(1)) {
