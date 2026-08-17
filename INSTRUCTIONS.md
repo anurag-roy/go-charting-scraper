@@ -1,15 +1,18 @@
 # GoCharting scraper — full setup & run instructions
 
-This document is the end-to-end guide for cloning this repo and starting a live
-scrape of **Max Vol B** / **Max Vol S** from
-[gocharting.com](https://gocharting.com). Follow it in order the first time.
+**Production entrypoint:** `src/index.js` (`npm start`). It runs 24×7, reads
+`email` / `password` / `Instrument1..3` from the Google Sheet `config` tab, and
+writes closed 2m / 3m / 5m candles to tabs named `{symbol} 2m` (etc.). See
+[`README.md`](README.md) for the product behaviour.
 
-Related reading (not required to start scraping):
+This document also covers the older single-symbol PoC
+(`investigation/poc-log-maxvol.js`) and protocol capture scripts.
 
-- [`README.md`](README.md) — one-page summary
-- [`investigation/FINDINGS.md`](investigation/FINDINGS.md) — how the data is
-  sourced and calculated (WebSocket + Protobuf)
-- [`.env.example`](.env.example) — credentials, Nifty symbol, Google Sheet, CSV
+Related reading:
+
+- [`README.md`](README.md) — 24×7 Google Sheet service
+- [`investigation/FINDINGS.md`](investigation/FINDINGS.md) — WebSocket + Protobuf
+- [`.env.example`](.env.example) — `GOOGLE_SHEET_ID` and service-account keys
 
 ---
 
@@ -229,13 +232,18 @@ your distro’s `nodejs` package if it is ≥ 20.
 
 ## 6. Install project dependencies
 
-Always from the **`investigation/`** directory (that is where `package.json`
-lives):
+From the **repo root** (24×7 service):
+
+```bash
+npm ci          # preferred: exact lockfile versions
+# if npm ci fails (no lock / dirty tree): npm install
+```
+
+The older PoC and capture scripts still use `investigation/package.json`:
 
 ```bash
 cd investigation
-npm ci          # preferred: exact lockfile versions
-# if npm ci fails (no lock / dirty tree): npm install
+npm ci
 ```
 
 This installs `dotenv`, `googleapis`, `protobufjs`, `pako`, `ws`, and
@@ -611,13 +619,30 @@ sudo journalctl -u gocharting-maxvol.service -e
 With `WRITE_CSV=1` and `CSV_PATH=/var/lib/gocharting/maxvol.csv` each shot
 **appends** newly closed candles and skips rows already in the file.
 
-### 14.3 systemd — long-running process
+### 14.3 systemd — 24×7 service (recommended)
 
-Omit `RUN_MS` so the process polls until 15:40 IST. It refreshes the JWT
-about every 45 minutes. Use `Restart=on-failure` with `RestartSec=30`.
+Install [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service).
+The process stays up overnight and on weekends; it closes the GoCharting
+websocket when every configured exchange is out of session and reconnects at
+the next open. Use `Restart=always`.
 
-A weekday timer that starts the service at 09:10 IST is simpler than
-keeping a process running overnight.
+`/etc/gocharting/env` only needs Google credentials (GoCharting email/password
+come from the `config` tab):
+
+```bash
+GOOGLE_SHEET_ID=your-spreadsheet-id
+GOOGLE_CLIENT_EMAIL=...
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+```
+
+```bash
+sudo cp deploy/gocharting-scraper.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now gocharting-scraper.service
+sudo journalctl -u gocharting-scraper.service -f
+```
+
+Errors are also appended to `logs/error.log` in the repo checkout.
 
 ### 14.4 cron alternative
 

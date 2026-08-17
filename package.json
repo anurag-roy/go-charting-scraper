@@ -1,0 +1,22 @@
+{
+  "name": "go-charting-scraper",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "24x7 GoCharting closed-candle scraper driven by a Google Sheet",
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "ONCE=1 node src/index.js",
+    "test": "node --test src/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "googleapis": "^174.0.1",
+    "pako": "^3.0.1",
+    "protobufjs": "^8.7.2",
+    "ws": "^8.18.3"
+  }
+}

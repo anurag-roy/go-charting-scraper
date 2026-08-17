@@ -1,0 +1,19 @@
+[Unit]
+Description=GoCharting Google Sheets scraper (24x7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gocharting
+Group=gocharting
+WorkingDirectory=/opt/go-charting-scraper
+EnvironmentFile=/etc/gocharting/env
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=10
+Nice=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

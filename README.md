@@ -1,56 +1,81 @@
 # go-charting-scraper
 
-Reverse-engineering how [gocharting.com](https://gocharting.com) sources and
-computes its footprint/order-flow data — specifically the **"Max Vol B"** and
-**"Max Vol S"** values shown on the terminal.
+24×7 service that reads GoCharting credentials and instruments from a Google
+Sheet, scrapes **closed** 2m / 3m / 5m footprint candles, and writes them back
+into that same spreadsheet. The process is meant to run unattended on a VPS.
 
-**To clone, install, and start scraping:** see
-[`INSTRUCTIONS.md`](INSTRUCTIONS.md) (prerequisites, env vars, Google Sheets,
-CSV schema, systemd/cron, Docker, troubleshooting). No browser required.
+GoCharting login is AWS Cognito over HTTPS (no browser). Market data is the
+WebSocket + Protobuf protocol documented in
+[`investigation/FINDINGS.md`](investigation/FINDINGS.md).
 
-- Protocol write-up: [`investigation/FINDINGS.md`](investigation/FINDINGS.md)
-- Capture & decode tooling: [`investigation/`](investigation/)
+## What it does
 
-## Short answer
+1. Polls the `config` tab every 5 seconds (12 Google reads/minute; the Sheets
+   API allowance is 60 reads/minute/user).
+2. Authenticates with the email/password from that tab and keeps the JWT in
+   process memory only (refresh before expiry; never written to disk).
+3. Tracks up to three instruments (`Instrument1`–`Instrument3`) in
+   `EXCHANGE:CATEGORY:SYMBOL` form (`NSE`, `BSE`, or `MCX`).
+4. For each instrument, writes **closed** 2m / 3m / 5m candles to tabs named
+   `{symbol} 2m`, `{symbol} 3m`, `{symbol} 5m` — for example
+   `NIFTY2681824300CE 2m`. Forming bars are never written.
+5. If an instrument changes from X to Y, monitoring switches to Y and new tabs
+   are created. X’s tabs are left in place. Y is backfilled for the current
+   (or last weekday) session.
+6. Stays running overnight and on weekends. NSE/BSE are sampled 09:15–15:40
+   IST; MCX energy-style contracts 09:00–23:30 IST (23:55 while US Eastern is
+   on daylight saving). Outside those windows the websocket is closed.
 
-The market data is delivered over a WebSocket
-(`wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws`) as binary Protobuf, not via
-any REST/JSON endpoint. Each footprint candle (`fpgc.FootPrintForDateResponse` →
-`FootPrintCandle`) includes a server-computed `max` field:
+## Config sheet
 
-- **Max Vol B** = `candle.max.buy.volume` = the largest buy volume at any single
-  price level in the candle.
-- **Max Vol S** = `candle.max.sell.volume` = the largest sell volume at any single
-  price level in the candle.
+Create a tab named `config` with labels in column A and values in column B:
 
-This was confirmed by decoding real captured frames with the site's own
-`footprint.proto`; the server values match the recomputed per-level maxima exactly.
-See [`investigation/FINDINGS.md`](investigation/FINDINGS.md) for the protocol,
-schema, and proof.
+| A | B |
+| --- | --- |
+| email | GoCharting login |
+| password | GoCharting password |
+| Instrument1 | `NSE:FUTURE:NIFTY-I` |
+| Instrument2 | `MCX:FUTURE:CRUDEOIL-I` |
+| Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` |
 
-## Live scraper (closed NSE candles)
+Share the spreadsheet with the service-account email as **Editor**. The
+password is stored in the sheet in plaintext — share the file only with people
+who should have that login, plus the service account.
 
-`investigation/poc-log-maxvol.js` authenticates with AWS Cognito over HTTPS
-(same `USER_PASSWORD_AUTH` flow as the website — **no browser**), opens the
-market-data WebSocket, and persists **OHLC** plus **Max Vol B / Max Vol S** for
-every **closed** `2m`, `3m`, and `5m` candle of `NSE:FUTURE:NIFTY-I` during the
-**09:15–15:40 IST** session: OHLC, **delta** (buy − sell volume), **max delta**,
-**Max Vol B / Max Vol S**, **point of control**, footprint **volume**, **OI
-change**, session **VWAP1**, and per-bar **VWAP2**. Forming (in-progress) bars are not written. It does not click
-chart/timeframe buttons — intervals are requested as `FOOTPRINT/V2` and
-`TS/V2` `OHLCV/V2`.
+## Candle columns
 
-Output is configured in `.env` (see [`.env.example`](.env.example)):
+Each `{symbol} 2m` / `3m` / `5m` tab uses this schema:
 
-- `GOOGLE_SHEET_ID` — append to a Google spreadsheet (tabs like `NIFTY-I 5m`)
-- `WRITE_CSV=1` — append the wider debug rows to a local CSV
+| Column | Meaning |
+| --- | --- |
+| `candle_time` | Candle open time in IST (no `+05:30` suffix) |
+| `delta` | Buy volume − sell volume |
+| `max_delta` | Intra-bar cumulative-delta high |
+| `max_vol_b` / `max_vol_s` | Max buy / sell volume at a single price |
+| `poc` | Point of control |
+| `volume` | Footprint candle volume |
+| `oi_change` | Change in open interest vs the previous OHLC bar |
+| `vwap1` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
+| `vwap2` | Per-bar footprint VWAP (ticks) |
+
+## Run
 
 ```bash
-cp .env.example .env   # fill in credentials + sheet id and/or WRITE_CSV=1
-cd investigation
-npm install
-RUN_MS=0 WRITE_CSV=1 node poc-log-maxvol.js   # one-shot backfill of closed bars
+cp .env.example .env   # GOOGLE_SHEET_ID + GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY
+npm ci
+npm start              # 24x7
+ONCE=1 npm start       # one config read + one sample, then exit
+npm test
 ```
 
-An example scrape with OHLC (older crude-oil POC) is committed at
-[`investigation/evidence/maxvol-poc.csv`](investigation/evidence/maxvol-poc.csv).
+Errors go to [`logs/error.log`](logs/README.md) (redacted) and stdout.
+[`logs/status.json`](logs/README.md) is a small heartbeat for the VPS.
+
+A systemd unit is in [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service).
+Full VPS notes, including the older PoC scraper, are in [`INSTRUCTIONS.md`](INSTRUCTIONS.md).
+
+## Protocol notes
+
+The live path does not open a browser. Intervals are requested as `FOOTPRINT/V2`
+and `TS/V2` `OHLCV/V2`. Reverse-engineering notes and capture scripts remain
+under [`investigation/`](investigation/).
