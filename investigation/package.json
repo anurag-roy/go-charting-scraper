@@ -4,13 +4,16 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "poc": "node poc-log-maxvol.js"
+    "poc": "node poc-log-maxvol.js",
+    "test": "node --test lib/*.test.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "dotenv": "^17.4.2",
+    "googleapis": "^174.0.1",
     "pako": "^3.0.1",
     "playwright": "^1.62.1",
     "protobufjs": "^8.7.2",
