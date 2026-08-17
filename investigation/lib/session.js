@@ -57,16 +57,16 @@ export function istInstant(dateStr, h, m, s = 0) {
   return Date.parse(`${dateStr}T${pad2(h)}:${pad2(m)}:${pad2(s)}+05:30`);
 }
 
-export function marketWindowMs(dateStr, open = '09:15', close = '15:30') {
+export function marketWindowMs(dateStr, open = '09:15', close = '15:40') {
   const o = parseHHmm(open, '09:15');
-  const c = parseHHmm(close, '15:30');
+  const c = parseHHmm(close, '15:40');
   return {
     openMs: istInstant(dateStr, o.h, o.m),
     closeMs: istInstant(dateStr, c.h, c.m),
   };
 }
 
-export function inSession(candleTimeIso, { open = '09:15', close = '15:30' } = {}) {
+export function inSession(candleTimeIso, { open = '09:15', close = '15:40' } = {}) {
   const start = Date.parse(candleTimeIso);
   if (!Number.isFinite(start)) return false;
   const dateStr = istDateString(new Date(start));
@@ -76,7 +76,7 @@ export function inSession(candleTimeIso, { open = '09:15', close = '15:30' } = {
 
 export function isCandleClosed(candleTimeIso, interval, nowMs, {
   open = '09:15',
-  close = '15:30',
+  close = '15:40',
   graceMs = 2000,
 } = {}) {
   const start = Date.parse(candleTimeIso);
@@ -88,13 +88,13 @@ export function isCandleClosed(candleTimeIso, interval, nowMs, {
   return nowMs >= closeAt + Number(graceMs || 0);
 }
 
-export function isBeforeOpen(nowMs, { open = '09:15', close = '15:30' } = {}) {
+export function isBeforeOpen(nowMs, { open = '09:15', close = '15:40' } = {}) {
   const dateStr = istDateString(new Date(nowMs));
   const { openMs } = marketWindowMs(dateStr, open, close);
   return nowMs < openMs;
 }
 
-export function isAfterClose(nowMs, { open = '09:15', close = '15:30' } = {}) {
+export function isAfterClose(nowMs, { open = '09:15', close = '15:40' } = {}) {
   const dateStr = istDateString(new Date(nowMs));
   const { closeMs } = marketWindowMs(dateStr, open, close);
   return nowMs >= closeMs;
@@ -134,7 +134,7 @@ export function persistSessionDate(nowMs, { open = '09:15' } = {}) {
 
 export function isPersistableCandle(candleTimeIso, nowMs, {
   open = '09:15',
-  close = '15:30',
+  close = '15:40',
 } = {}) {
   if (!inSession(candleTimeIso, { open, close })) return false;
   const start = Date.parse(candleTimeIso);

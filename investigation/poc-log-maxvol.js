@@ -1,13 +1,13 @@
-// Live scraper: persist closed 2m / 3m / 5m footprint candles (OHLC + Max Vol B/S)
-// for NSE Nifty futures during the 09:15–15:30 IST cash session.
+// Live scraper: persist closed 2m / 3m / 5m footprint candles (OHLC, delta,
+// max delta, Max Vol B/S, POC, volume, OI change, session VWAP and per-bar VWAP) for NSE Nifty
+// during the 09:15–15:40 IST session.
 //
-// Visits the saved chart URL and logs in (required). Does NOT change profile
-// settings or click terminal/chart buttons — intervals are requested over the
-// market-data WebSocket (FOOTPRINT/V2 + TS/V2 OHLCV/V2). See FINDINGS.md.
+// Auth is AWS Cognito USER_PASSWORD_AUTH (same public client id the website
+// uses). No browser is required. Intervals are requested over the market-data
+// WebSocket (FOOTPRINT/V2 + TS/V2 OHLCV/V2). See FINDINGS.md.
 //
 // Config: gitignored .env at repo root or investigation/ (see .env.example).
 // Writes to Google Sheets when GOOGLE_SHEET_ID is set; local CSV when WRITE_CSV=1.
-import { chromium } from 'playwright';
 import WebSocket from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,6 +18,11 @@ import { loadConfig, validateConfig } from './lib/env.js';
 import { CsvSink } from './lib/csv-sink.js';
 import { SheetsSink } from './lib/sheets-sink.js';
 import { symbolId } from './lib/columns.js';
+import {
+  footprintMetrics,
+  oiFields,
+  vwapByCandleTime,
+} from './lib/footprint-metrics.js';
 import {
   formatIst,
   inSession,
@@ -40,18 +45,23 @@ if (configErrors.length) {
   process.exit(2);
 }
 
-const CHART_URL = cfg.chartUrl;
 const DEFAULT_WS_HOST = cfg.wsHost;
+const DEVICE_TAG = cfg.wsTag;
 const SYMBOL = cfg.symbol;
 const INTERVALS = cfg.intervals;
 const SESSION = cfg.session;
 const RUN_MS = cfg.runMs;
 const SAMPLE_MS = cfg.sampleMs;
 const LAST_N = cfg.lastN;
-const HEADLESS = cfg.headless;
 const OUT_DIR = cfg.outDir;
 const email = cfg.email;
 const password = cfg.password;
+
+// Public Amplify/Cognito config from the GoCharting web client.
+const COGNITO_REGION = 'ap-south-1';
+const COGNITO_CLIENT_ID = '3fqhvm22ea8pjsr2spbnv484pr';
+const COGNITO_ENDPOINT = `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`;
+const COGNITO_CLIENT_METADATA = { myCustomKey: 'myCustomValue' };
 const sessionOpts = {
   open: cfg.marketOpen,
   close: cfg.marketClose,
@@ -72,6 +82,67 @@ function redact(s) {
   out = out.replace(/token=[^&"'\s]+/gi, 'token=[REDACTED]');
   out = out.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[JWT]');
   return out;
+}
+
+function jwtExpMs(token) {
+  try {
+    const payload = token.split('.')[1];
+    const json = Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const exp = JSON.parse(json).exp;
+    return Number(exp) * 1000;
+  } catch {
+    return 0;
+  }
+}
+
+async function cognitoInitiateAuth({ username, password: pw, refreshToken }) {
+  const body = refreshToken
+    ? {
+      AuthFlow: 'REFRESH_TOKEN_AUTH',
+      ClientId: COGNITO_CLIENT_ID,
+      AuthParameters: { REFRESH_TOKEN: refreshToken },
+      ClientMetadata: COGNITO_CLIENT_METADATA,
+    }
+    : {
+      AuthFlow: 'USER_PASSWORD_AUTH',
+      ClientId: COGNITO_CLIENT_ID,
+      AuthParameters: { USERNAME: username, PASSWORD: pw },
+      ClientMetadata: COGNITO_CLIENT_METADATA,
+    };
+  const res = await fetch(COGNITO_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-amz-json-1.1',
+      'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth',
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch {
+    throw new Error(`cognito non-json ${res.status}`);
+  }
+  if (!res.ok || data.__type || data.message) {
+    const msg = data.message || data.__type || `HTTP ${res.status}`;
+    throw new Error(`cognito auth failed: ${msg}`);
+  }
+  if (data.ChallengeName) {
+    throw new Error(`cognito extra challenge: ${data.ChallengeName}`);
+  }
+  const ar = data.AuthenticationResult || {};
+  if (!ar.IdToken) throw new Error('cognito auth failed: no IdToken');
+  return {
+    idToken: ar.IdToken,
+    accessToken: ar.AccessToken || '',
+    refreshToken: ar.RefreshToken || refreshToken || '',
+    expiresIn: Number(ar.ExpiresIn || 0),
+    expMs: jwtExpMs(ar.IdToken),
+  };
+}
+
+function buildWsUrl(idToken) {
+  return `${DEFAULT_WS_HOST}?token=${encodeURIComponent(idToken)}&tag=${encodeURIComponent(DEVICE_TAG)}`;
 }
 
 const num = (v) => (v && typeof v === 'object' && 'toNumber' in v ? v.toNumber() : Number(v || 0));
@@ -197,44 +268,7 @@ function parseFrame(buf) {
 }
 
 function summarizeCandle(candle) {
-  const levels = candle.footprint || [];
-  let maxBuy = 0;
-  let maxSell = 0;
-  let maxBuyLevel = '';
-  let maxSellLevel = '';
-  let fpHigh = -Infinity;
-  let fpLow = Infinity;
-  for (const l of levels) {
-    const b = num(l.buy?.volume);
-    const s = num(l.sell?.volume);
-    const px = num(l.level);
-    if (b > maxBuy) { maxBuy = b; maxBuyLevel = px; }
-    if (s > maxSell) { maxSell = s; maxSellLevel = px; }
-    if (b + s > 0) {
-      if (px > fpHigh) fpHigh = px;
-      if (px < fpLow) fpLow = px;
-    }
-  }
-  const es = candle.endingSummary || candle.ending_summary || {};
-  const esHigh = num(es.high);
-  const esLow = num(es.low);
-  const serverBuy = num(candle.max?.buy?.volume);
-  const serverSell = num(candle.max?.sell?.volume);
-  return {
-    candle_time: candle.date || '',
-    max_vol_b: serverBuy,
-    max_vol_s: serverSell,
-    totals_buy: num(candle.totals?.buy?.volume),
-    totals_sell: num(candle.totals?.sell?.volume),
-    price_levels: levels.length,
-    recomputed_max_b: maxBuy,
-    recomputed_max_s: maxSell,
-    max_vol_b_level: maxBuyLevel,
-    max_vol_s_level: maxSellLevel,
-    values_match: serverBuy === maxBuy && serverSell === maxSell,
-    fp_high: esHigh || (Number.isFinite(fpHigh) ? fpHigh : ''),
-    fp_low: esLow || (Number.isFinite(fpLow) ? fpLow : ''),
-  };
+  return footprintMetrics(candle);
 }
 
 function lastNCandles(candles, n) {
@@ -245,8 +279,8 @@ function lastNCandles(candles, n) {
 }
 
 class FootprintClient {
-  constructor(wsUrl, FP, OHLC, ohlcCollector, { symbol, intervals, session } = {}) {
-    this.wsUrl = wsUrl;
+  constructor(FP, OHLC, ohlcCollector, { symbol, intervals, session } = {}) {
+    this.wsUrl = '';
     this.FP = FP;
     this.OHLC = OHLC;
     this.ohlcCollector = ohlcCollector;
@@ -259,10 +293,14 @@ class FootprintClient {
     this.nativeIntervals = new Set();
   }
 
-  connect() {
+  connect(wsUrl) {
+    if (wsUrl) this.wsUrl = wsUrl;
     try { this.ws?.close(); } catch {}
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.wsUrl, {
+        origin: 'https://gocharting.com',
+        perMessageDeflate: false,
+        handshakeTimeout: 20_000,
         headers: {
           Origin: 'https://gocharting.com',
           'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
@@ -277,9 +315,19 @@ class FootprintClient {
         dbg({ ev: 'poc-ws-open' });
         resolve();
       });
+      ws.on('unexpected-response', (req, res) => {
+        dbg({ ev: 'poc-ws-unexpected', status: res.statusCode });
+        if (!opened) {
+          clearTimeout(t);
+          reject(new Error(`ws unexpected HTTP ${res.statusCode}`));
+        }
+      });
       ws.on('error', (err) => {
         dbg({ ev: 'poc-ws-error', err: String(err.message || err) });
-        if (!opened) reject(err);
+        if (!opened) {
+          clearTimeout(t);
+          reject(err);
+        }
       });
       ws.on('close', (code, reason) => {
         dbg({ ev: 'poc-ws-close', code, reason: redact(String(reason || '')) });
@@ -518,132 +566,6 @@ class FootprintClient {
   }
 }
 
-async function loginAndGetWsUrl(page, context, ohlcCollector) {
-  let wsUrl = '';
-  const seen = new Set();
-
-  const noteUrl = (u) => {
-    if (!u || seen.has(u)) return;
-    seen.add(u);
-    dbg({ ev: 'ws-seen', url: redact(u) });
-    if (/\/ws(\?|$)/.test(u) && u.includes('token=')) wsUrl = u;
-    else if (/gocharting\.com.*\/ws/.test(u) && !wsUrl) wsUrl = u;
-  };
-
-  if (!page._pocSnifferAttached) {
-    page._pocSnifferAttached = true;
-    page.on('websocket', (ws) => {
-      noteUrl(ws.url());
-      ws.on('framesent', (d) => {
-        const s = typeof d.payload === 'string' ? d.payload : '';
-        if (s) ohlcCollector?.noteSent(s);
-        if (s && /FOOTPRINT|command/i.test(s)) dbg({ ev: 'native-sent', data: redact(s).slice(0, 1500) });
-      });
-      ws.on('framereceived', (d) => {
-        const p = d.payload;
-        if (p == null) return;
-        let buf;
-        if (Buffer.isBuffer(p)) buf = p;
-        else if (typeof p === 'string') {
-          if (!p.length || p.charCodeAt(0) === 0x7b) return;
-          buf = Buffer.from(p, 'latin1');
-        } else {
-          buf = Buffer.from(p);
-        }
-        const n = ohlcCollector?.noteBinary(buf) || 0;
-        if (n) dbg({ ev: 'native-ohlc', url: redact(ws.url()), bars: n });
-      });
-    });
-
-    try {
-      const cdp = await context.newCDPSession(page);
-      await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
-      await cdp.send('Network.enable');
-      cdp.on('Network.webSocketCreated', (p) => noteUrl(p.url));
-      cdp.on('Target.attachedToTarget', async (ev) => {
-        try {
-          const session = ev.sessionId
-            ? await context.newCDPSession(page).catch(() => null)
-            : null;
-          void session;
-        } catch {}
-      });
-    } catch (e) {
-      dbg({ ev: 'cdp-err', err: e.message });
-    }
-  }
-
-  const onChart = /gocharting\.com/.test(page.url());
-  if (!onChart) {
-    console.log('goto', CHART_URL);
-    await page.goto(CHART_URL, { waitUntil: 'domcontentloaded', timeout: 90_000 });
-    await page.waitForTimeout(5000);
-  }
-
-  const dismiss = page.locator('button', { hasText: /^Dismiss$/ });
-  if (await dismiss.count()) {
-    await dismiss.first().click().catch(() => {});
-    await page.waitForTimeout(800);
-  }
-
-  const existingToken = await idTokenFromPage(page);
-  const loginModal = await page.locator('#email_field').count();
-  if (!existingToken || loginModal > 0) {
-    console.log('login');
-    await page.locator('#login-avatar').click({ timeout: 15_000 });
-    await page.waitForSelector('#email_field', { timeout: 20_000 });
-    await page.fill('#email_field', email);
-    await page.fill('#password_field', password);
-    await page.locator('button[type=submit]', { hasText: /Sign In/i }).click();
-    await page.waitForTimeout(8000);
-
-    const stillLogin = await page.locator('#email_field').count();
-    console.log('loginModalGone=', stillLogin === 0, 'url=', page.url());
-    if (stillLogin > 0) {
-      await page.screenshot({ path: path.join(OUT_DIR, 'login-failed.png') }).catch(() => {});
-      throw new Error('login modal still present');
-    }
-  } else {
-    console.log('already logged in');
-  }
-  await page.screenshot({ path: path.join(OUT_DIR, 'after-login.png') }).catch(() => {});
-
-  if (!String(wsUrl).includes('token=')) {
-    const fromPage = await wsUrlFromPage(page, wsUrl || DEFAULT_WS_HOST);
-    if (fromPage) wsUrl = fromPage;
-  }
-
-  // Wait for the market-data WS (token in query string).
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline && !String(wsUrl).includes('token=')) {
-    await page.waitForTimeout(500);
-  }
-
-  if (!String(wsUrl).includes('token=')) {
-    wsUrl = await wsUrlFromPage(page, wsUrl || DEFAULT_WS_HOST);
-  }
-
-  if (!wsUrl) throw new Error('could not obtain market-data websocket URL / token');
-  dbg({ ev: 'ws-url-ready', url: redact(wsUrl) });
-  return wsUrl;
-}
-
-async function idTokenFromPage(page) {
-  return page.evaluate(() => {
-    for (const k of Object.keys(localStorage)) {
-      if (/idToken$/i.test(k)) return localStorage.getItem(k) || '';
-    }
-    return '';
-  });
-}
-
-async function wsUrlFromPage(page, fallbackHost) {
-  const tok = await idTokenFromPage(page);
-  if (!tok) return '';
-  const host = String(fallbackHost || DEFAULT_WS_HOST).split('?')[0] || DEFAULT_WS_HOST;
-  return `${host}?token=${tok}`;
-}
-
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -666,7 +588,7 @@ function shouldStop(startedAt) {
 }
 
 function candleToRow({
-  interval, candle, ohlcBars, sampled_at_utc, sampled_at_ist, sample_n, candlesInResponse, error,
+  interval, candle, ohlcBars, vwapMap, sampled_at_utc, sampled_at_ist, sample_n, candlesInResponse, error,
 }) {
   const stats = candle ? summarizeCandle(candle) : {};
   const bar = candle ? findOhlcBar(ohlcBars, stats.candle_time) : null;
@@ -675,6 +597,8 @@ function candleToRow({
   }
   const high = bar ? bar.high : (candle ? stats.fp_high : '');
   const low = bar ? bar.low : (candle ? stats.fp_low : '');
+  const oi = bar ? oiFields(bar, ohlcBars) : { oi: '', oi_change: '' };
+  const vwap1 = bar && vwapMap ? (vwapMap.get(bar.time) ?? '') : '';
   return {
     sampled_at_utc,
     sampled_at_ist,
@@ -700,6 +624,16 @@ function candleToRow({
     candles_in_response: candlesInResponse,
     ok: Boolean(candle),
     error: candle ? '' : (error || 'no candle'),
+    delta: candle ? stats.delta : '',
+    max_delta: candle ? stats.max_delta : '',
+    min_delta: candle ? stats.min_delta : '',
+    poc: candle ? stats.poc : '',
+    poc_volume: candle ? stats.poc_volume : '',
+    volume: candle ? stats.volume : '',
+    oi: oi.oi,
+    oi_change: oi.oi_change,
+    vwap1,
+    vwap2: candle ? stats.vwap2 : '',
   };
 }
 
@@ -715,7 +649,7 @@ async function initSinks() {
       googlePrivateKey: cfg.googlePrivateKey,
     }));
   }
-  await Promise.all(sinks.map((s) => s.init(INTERVALS)));
+  await Promise.all(sinks.map((s) => s.init(INTERVALS, SYMBOL.symbol)));
   return sinks;
 }
 
@@ -724,15 +658,18 @@ async function writeToSinks(sinks, rows) {
   return counts.reduce((a, b) => a + b, 0);
 }
 
-async function refreshAuth(page, context, client, ohlcCollector) {
-  console.log('refreshing market-data websocket token');
-  const host = (client.wsUrl || DEFAULT_WS_HOST).split('?')[0];
-  let wsUrl = await wsUrlFromPage(page, host);
-  if (!wsUrl.includes('token=')) {
-    wsUrl = await loginAndGetWsUrl(page, context, ohlcCollector);
+async function refreshAuth(client, auth) {
+  console.log('refreshing cognito token');
+  let next;
+  try {
+    next = await cognitoInitiateAuth({ refreshToken: auth.refreshToken });
+  } catch (e) {
+    dbg({ ev: 'refresh-fail', err: String(e.message || e) });
+    next = await cognitoInitiateAuth({ username: email, password });
   }
-  client.wsUrl = wsUrl;
-  await client.connect();
+  dbg({ ev: 'cognito-refresh', expiresIn: next.expiresIn, expMs: next.expMs });
+  await client.connect(buildWsUrl(next.idToken));
+  return next;
 }
 
 async function main() {
@@ -744,10 +681,9 @@ async function main() {
   const OHLC = ohlcRoot.lookupType('protobars.OHLCBarResult');
   const ohlcCollector = new OhlcCollector(OHLC);
 
-  const launchOpts = { headless: HEADLESS, args: ['--no-sandbox', '--disable-dev-shm-usage'] };
-  if (cfg.pwChannel) launchOpts.channel = cfg.pwChannel;
-  console.log('browser launch', { headless: HEADLESS, channel: cfg.pwChannel || 'playwright-chromium' });
+  console.log('cognito login (USER_PASSWORD_AUTH, no browser)');
   console.log('symbol', symbolId(SYMBOL), 'intervals', INTERVALS.join(', '), 'session', `${cfg.marketOpen}–${cfg.marketClose} IST`);
+  console.log('ws', DEFAULT_WS_HOST);
   console.log('outputs', {
     csv: cfg.writeCsv ? cfg.csvPath : false,
     sheet: cfg.sheetId || false,
@@ -768,20 +704,18 @@ async function main() {
     }
   }
 
-  const browser = await chromium.launch(launchOpts);
-  const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
-  const page = await context.newPage();
+  let auth = await cognitoInitiateAuth({ username: email, password });
+  dbg({ ev: 'cognito-ok', expiresIn: auth.expiresIn, expMs: auth.expMs });
+  console.log('cognito ok expiresIn=', auth.expiresIn, 's');
 
-  let client;
+  const client = new FootprintClient(FP, OHLC, ohlcCollector, {
+    symbol: SYMBOL,
+    intervals: INTERVALS,
+    session: SESSION,
+  });
+  await client.connect(buildWsUrl(auth.idToken));
   let lastAuthAt = Date.now();
   try {
-    const wsUrl = await loginAndGetWsUrl(page, context, ohlcCollector);
-    client = new FootprintClient(wsUrl, FP, OHLC, ohlcCollector, {
-      symbol: SYMBOL,
-      intervals: INTERVALS,
-      session: SESSION,
-    });
-    await client.connect();
 
     const start = Date.now();
     let sampleN = 0;
@@ -799,9 +733,10 @@ async function main() {
       console.log(`\n--- sample ${sampleN} @ ${sampled_at_utc} ---`);
       console.log('session dates (IST):', dates.join(', '));
 
-      if (nowMs - lastAuthAt >= cfg.tokenRefreshMs || client.ws.readyState !== WebSocket.OPEN) {
+      const tokenStale = auth.expMs - nowMs < 5 * 60_000;
+      if (tokenStale || nowMs - lastAuthAt >= cfg.tokenRefreshMs || client.ws.readyState !== WebSocket.OPEN) {
         try {
-          await refreshAuth(page, context, client, ohlcCollector);
+          auth = await refreshAuth(client, auth);
           lastAuthAt = Date.now();
         } catch (e) {
           console.error('auth refresh failed', e);
@@ -811,7 +746,7 @@ async function main() {
 
       if (client.ws.readyState !== WebSocket.OPEN) {
         console.log('ws not open; reconnecting');
-        await client.connect();
+        await client.connect(buildWsUrl(auth.idToken));
       }
 
       const results = await Promise.all(INTERVALS.map(async (iv) => {
@@ -825,6 +760,8 @@ async function main() {
       const closedRows = [];
       for (const { interval, fp: res, ohlc } of results) {
         const ohlcBars = dedupeOhlcBars([...(ohlc?.bars || []), ...ohlcCollector.getBars(interval)]);
+        const sessionBars = ohlcBars.filter((b) => inSession(b.time, sessionOpts));
+        const vwapMap = vwapByCandleTime(sessionBars);
         const candles = res.candles || [];
         if (LAST_N > 0) {
           const slice = lastNCandles(candles, LAST_N);
@@ -832,8 +769,9 @@ async function main() {
           for (const c of slice) {
             const s = summarizeCandle(c);
             const bar = findOhlcBar(ohlcBars, s.candle_time);
+            const vwap1 = bar ? (vwapMap.get(bar.time) ?? '') : '';
             console.log(
-              `    ${s.candle_time}  OHLC=${fmtOhlc(bar)}  MaxVolB=${s.max_vol_b} MaxVolS=${s.max_vol_s} totals=${s.totals_buy}/${s.totals_sell} levels=${s.price_levels} match=${s.values_match}`,
+              `    ${s.candle_time}  OHLC=${fmtOhlc(bar)}  Δ=${s.delta} maxΔ=${s.max_delta} MaxVolB=${s.max_vol_b} MaxVolS=${s.max_vol_s} POC=${s.poc} vol=${s.volume} VWAP1=${vwap1} VWAP2=${s.vwap2} match=${s.values_match}`,
             );
           }
         }
@@ -848,6 +786,7 @@ async function main() {
             interval,
             candle,
             ohlcBars,
+            vwapMap,
             sampled_at_utc,
             sampled_at_ist,
             sample_n: sampleN,
@@ -868,8 +807,9 @@ async function main() {
           const lastClosed = closed[closed.length - 1];
           const stats = summarizeCandle(lastClosed);
           const bar = findOhlcBar(ohlcBars, stats.candle_time);
+          const vwap1 = bar ? (vwapMap.get(bar.time) ?? '') : '';
           console.log(
-            `    last closed ${stats.candle_time}  OHLC=${fmtOhlc(bar)}  MaxVolB=${stats.max_vol_b} MaxVolS=${stats.max_vol_s} match=${stats.values_match}`,
+            `    last closed ${stats.candle_time}  OHLC=${fmtOhlc(bar)}  Δ=${stats.delta} maxΔ=${stats.max_delta} MaxVolB=${stats.max_vol_b} MaxVolS=${stats.max_vol_s} POC=${stats.poc} vol=${stats.volume} VWAP1=${vwap1} VWAP2=${stats.vwap2} match=${stats.values_match}`,
           );
         }
       }
@@ -889,7 +829,6 @@ async function main() {
   } finally {
     try { client?.ws?.close(); } catch {}
     debugLog.end();
-    await browser.close().catch(() => {});
   }
 }
 

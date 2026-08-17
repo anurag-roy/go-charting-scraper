@@ -56,6 +56,7 @@ export function loadConfig() {
 
   const runMsEnv = process.env.RUN_MS;
   const runMs = runMsEnv == null || runMsEnv === '' ? null : Number(runMsEnv);
+  const wsDc = process.env.WS_DC || 'blr1';
 
   return {
     email: String(process.env.GOCHARTING_EMAIL || '').trim(),
@@ -63,7 +64,9 @@ export function loadConfig() {
     headless: flag('HEADLESS'),
     pwChannel: process.env.PW_CHANNEL || '',
     chartUrl: process.env.CHART_URL || 'https://gocharting.com/terminal/chart/kd5OXEIXs',
-    wsHost: process.env.WS_HOST || 'wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws',
+    wsDc,
+    wsTag: process.env.WS_TAG || 'go-charting-scraper',
+    wsHost: process.env.WS_HOST || `wss://origin.ws.prodb.${wsDc}.gocharting.com/${wsDc}/ws`,
     symbol: {
       exchange: process.env.GOCHARTING_EXCHANGE || 'NSE',
       segment: process.env.GOCHARTING_SEGMENT || 'FUTURE',
@@ -72,7 +75,7 @@ export function loadConfig() {
     session: process.env.GOCHARTING_SESSION || 'RTH',
     intervals,
     marketOpen: process.env.MARKET_OPEN || '09:15',
-    marketClose: process.env.MARKET_CLOSE || '15:30',
+    marketClose: process.env.MARKET_CLOSE || '15:40',
     closeGraceMs: Number(process.env.CLOSE_GRACE_MS || 2000),
     runMs,
     sampleMs: Number(process.env.SAMPLE_MS || 15_000),
