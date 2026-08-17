@@ -57,7 +57,8 @@ session:
 | **POC** | Point of control: price level with the most total (buy+sell) volume |
 | **Volume** | Footprint total volume (`totals.overall`, else buy+sell) |
 | **OI change** | This bar’s open interest minus the previous bar’s (`TS/V2` `oi`) |
-| **VWAP** | Per-bar volume-weighted average of footprint price levels (same as GoCharting bar statistics). Stored in ticks. |
+| **VWAP1** | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, reset each IST day |
+| **VWAP2** | Per-bar VWAP from footprint price levels (same as GoCharting bar statistics) |
 
 The in-progress (forming) candle is **not** written. After a bar's end time the
 scraper waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the print,
@@ -99,7 +100,7 @@ choices (outbound hosts, secrets) make sense.
 6. For each interval it keeps every **closed** candle whose open time is in the
    09:15–15:40 IST window for the current (or last weekday) session, and writes
    OHLC, delta / max delta, Max Vol B/S, POC, footprint volume, OI change, and
-   per-bar VWAP to Google Sheets and/or CSV.
+   session VWAP (`vwap1`) and per-bar VWAP (`vwap2`) to Google Sheets and/or CSV.
 7. It also recomputes `max(level.buy.volume)` / `max(level.sell.volume)` and
    records `values_match=true` when they agree with the server. OHLC bars are
    matched to the footprint candle by timestamp (`start + offset` minutes).
@@ -460,7 +461,8 @@ safe to re-run.
 | `volume` | Footprint candle volume (`totals.overall.volume`, else buy+sell) |
 | `oi` | Open interest at the end of the matching OHLC bar |
 | `oi_change` | `oi` minus the previous OHLC bar’s `oi` (empty on the first bar in the response) |
-| `vwap` | Per-bar VWAP from footprint levels: `sum(price × volume) / sum(volume)`. Same as GoCharting bar statistics. Ticks (chart shows `round(ticks/100)` rupees). |
+| `vwap1` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, reset each IST session date. After-hours bars are excluded. |
+| `vwap2` | Per-bar VWAP from footprint levels: `sum(price × volume) / sum(volume)`. Same as GoCharting bar statistics. Ticks (chart shows `round(ticks/100)` rupees). |
 
 Price `level` values are **integer ticks** as sent by the feed.
 
@@ -488,7 +490,8 @@ Sheets use a slim schema (CSV keeps the wider debug columns):
 | `poc` | Point of control (price tick with most buy+sell volume) |
 | `volume` | Footprint candle volume |
 | `oi_change` | Change in open interest vs the previous OHLC bar |
-| `vwap` | Per-bar footprint VWAP in ticks (chart bar stats show `round(ticks/100)`) |
+| `vwap1` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
+| `vwap2` | Per-bar footprint VWAP in ticks (chart bar stats show `round(ticks/100)`) |
 
 ### One-time Google Cloud setup
 

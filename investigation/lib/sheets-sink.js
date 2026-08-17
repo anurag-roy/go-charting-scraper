@@ -5,6 +5,8 @@ import {
   selectNewSheetRows,
   sheetRowKey,
   sheetTabName,
+  isPrefixHeader,
+  isLegacyVwapHeader,
 } from './columns.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
@@ -107,7 +109,7 @@ export class SheetsSink {
       return;
     }
     const header = values[0] || [];
-    if (header.length < SHEET_COLUMNS.length && header.every((h, i) => h === SHEET_COLUMNS[i])) {
+    if (isPrefixHeader(header, SHEET_COLUMNS) || isLegacyVwapHeader(header, SHEET_COLUMNS)) {
       await this.sheetsApi.spreadsheets.values.update({
         spreadsheetId: this.spreadsheetId,
         range: sheetA1(tab, 'A1'),

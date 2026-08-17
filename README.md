@@ -36,7 +36,7 @@ market-data WebSocket, and persists **OHLC** plus **Max Vol B / Max Vol S** for
 every **closed** `2m`, `3m`, and `5m` candle of `NSE:FUTURE:NIFTY-I` during the
 **09:15–15:40 IST** session: OHLC, **delta** (buy − sell volume), **max delta**,
 **Max Vol B / Max Vol S**, **point of control**, footprint **volume**, **OI
-change**, and per-bar **VWAP**. Forming (in-progress) bars are not written. It does not click
+change**, session **VWAP1**, and per-bar **VWAP2**. Forming (in-progress) bars are not written. It does not click
 chart/timeframe buttons — intervals are requested as `FOOTPRINT/V2` and
 `TS/V2` `OHLCV/V2`.
 

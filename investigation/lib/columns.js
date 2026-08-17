@@ -32,7 +32,8 @@ export const COLUMNS = [
   'volume',
   'oi',
   'oi_change',
-  'vwap',
+  'vwap1',
+  'vwap2',
 ];
 
 /** Slim schema written to Google Sheets (CSV keeps the wider debug columns). */
@@ -45,7 +46,8 @@ export const SHEET_COLUMNS = [
   'poc',
   'volume',
   'oi_change',
-  'vwap',
+  'vwap1',
+  'vwap2',
 ];
 
 export function rowKey(interval, candleTime) {
@@ -147,6 +149,20 @@ export function selectNewRows(keys, rows) {
     out.push(row);
   }
   return out;
+}
+
+export function isPrefixHeader(header, columns) {
+  return Array.isArray(header)
+    && header.length > 0
+    && header.length < columns.length
+    && header.every((h, i) => h === columns[i]);
+}
+
+/** Previous schema ended in `vwap` before it was split into vwap1 / vwap2. */
+export function isLegacyVwapHeader(header, columns) {
+  if (!Array.isArray(header) || header.length !== columns.length - 1) return false;
+  const legacy = columns.slice(0, -2).concat(['vwap']);
+  return header.every((h, i) => h === legacy[i]);
 }
 
 export function symbolId(symbol) {

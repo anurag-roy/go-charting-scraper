@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { COLUMNS, parseCsvLine, rowKey, rowToCsvLine, selectNewRows } from './columns.js';
+import { COLUMNS, parseCsvLine, rowKey, rowToCsvLine, selectNewRows, isPrefixHeader, isLegacyVwapHeader } from './columns.js';
 
 function readHeaderLine(filePath) {
   const fd = fs.openSync(filePath, 'r');
@@ -14,12 +14,6 @@ function readHeaderLine(filePath) {
   } finally {
     fs.closeSync(fd);
   }
-}
-
-function isPrefixHeader(header) {
-  return header.length > 0
-    && header.length < COLUMNS.length
-    && header.every((h, i) => h === COLUMNS[i]);
 }
 
 function rewriteHeaderLine(filePath, newHeader) {
@@ -44,7 +38,9 @@ export class CsvSink {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     if (fs.existsSync(this.filePath) && fs.statSync(this.filePath).size > 0) {
       const header = parseCsvLine(readHeaderLine(this.filePath));
-      if (isPrefixHeader(header)) rewriteHeaderLine(this.filePath, COLUMNS);
+      if (isPrefixHeader(header, COLUMNS) || isLegacyVwapHeader(header, COLUMNS)) {
+        rewriteHeaderLine(this.filePath, COLUMNS);
+      }
       await this.#loadKeys();
       return;
     }

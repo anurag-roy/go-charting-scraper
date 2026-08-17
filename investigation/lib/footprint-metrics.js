@@ -108,7 +108,7 @@ export function footprintMetrics(candle) {
     fp_high: esHigh || (Number.isFinite(fpHigh) ? fpHigh : ''),
     fp_low: esLow || (Number.isFinite(fpLow) ? fpLow : ''),
     // Per-bar VWAP from footprint levels (GoCharting bar statistics). Ticks.
-    vwap: vwapVol > 0 ? Number((vwapPv / vwapVol).toFixed(2)) : '',
+    vwap2: vwapVol > 0 ? Number((vwapPv / vwapVol).toFixed(2)) : '',
   };
 }
 
@@ -139,4 +139,52 @@ export function oiFields(bar, bars) {
     return { oi, oi_change: '' };
   }
   return { oi, oi_change: oi - num(prev.oi) };
+}
+
+/** Typical price used for session VWAP: (H + L + C) / 3. */
+export function typicalPrice(bar) {
+  const h = Number(bar?.high ?? bar?.h);
+  const l = Number(bar?.low ?? bar?.l);
+  const c = Number(bar?.close ?? bar?.c);
+  if (![h, l, c].every(Number.isFinite)) return null;
+  return (h + l + c) / 3;
+}
+
+function sessionDateKey(bar) {
+  if (bar?.session_date) return String(bar.session_date);
+  return String(bar?.time || '').slice(0, 10);
+}
+
+/**
+ * Session VWAP keyed by candle `time` (sheet column `vwap1`).
+ *
+ * Cumulative typical-price × volume / volume, reset on each IST session date.
+ * Zero-volume bars do not move the average; they inherit the last VWAP of that
+ * session. Pass only in-session bars so after-hours prints do not pollute it.
+ */
+export function vwapByCandleTime(bars, { decimals = 2 } = {}) {
+  const map = new Map();
+  const grouped = new Map();
+  for (const b of bars || []) {
+    if (!b?.time) continue;
+    const day = sessionDateKey(b);
+    if (!day) continue;
+    if (!grouped.has(day)) grouped.set(day, []);
+    grouped.get(day).push(b);
+  }
+  for (const [, dayBars] of grouped) {
+    dayBars.sort((a, b) => String(a.time).localeCompare(String(b.time)));
+    let pv = 0;
+    let v = 0;
+    for (const b of dayBars) {
+      const vol = Number(b.volume);
+      const tp = typicalPrice(b);
+      if (tp != null && Number.isFinite(vol) && vol > 0) {
+        pv += tp * vol;
+        v += vol;
+      }
+      map.set(b.time, v > 0 ? Number((pv / v).toFixed(decimals)) : '');
+    }
+  }
+  return map;
 }

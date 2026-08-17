@@ -30,7 +30,8 @@ describe('sheet helpers', () => {
       poc: 24300,
       volume: 150,
       oi_change: 12,
-      vwap: 24310.25,
+      vwap1: 7800.5,
+      vwap2: 7873.38,
       open: 1,
       min_delta: -10,
     });
@@ -43,7 +44,8 @@ describe('sheet helpers', () => {
       24300,
       150,
       12,
-      24310.25,
+      7800.5,
+      7873.38,
     ]);
     assert.deepEqual(SHEET_COLUMNS, [
       'candle_time',
@@ -54,7 +56,8 @@ describe('sheet helpers', () => {
       'poc',
       'volume',
       'oi_change',
-      'vwap',
+      'vwap1',
+      'vwap2',
     ]);
   });
 });
@@ -94,7 +97,8 @@ describe('SheetsSink.writeRows', () => {
         interval: '2m',
         candle_time: '2026-08-17T09:17:00+05:30',
         delta: 2,
-        vwap: 10.5,
+        vwap1: 10.1,
+        vwap2: 10.5,
       },
       {
         ok: true,
