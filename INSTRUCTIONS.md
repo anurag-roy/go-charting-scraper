@@ -5,9 +5,13 @@ The process lives on your VPS, reads GoCharting credentials and instruments
 from a spreadsheet `config` tab, and writes **closed** 2m / 3m / 5m candles
 back into that same spreadsheet.
 
+Running on the **client’s Windows laptop** instead (powered on each morning,
+not a VPS): [`WINDOWS.md`](WINDOWS.md).
+
 Related reading:
 
 - [`README.md`](README.md) — one-page product summary
+- [`WINDOWS.md`](WINDOWS.md) — Windows laptop handover (daily start, sleep, gaps)
 - [`.env.example`](.env.example) — Google credentials and optional knobs
 - [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service) — systemd unit
 - [`investigation/FINDINGS.md`](investigation/FINDINGS.md) — WebSocket + Protobuf protocol (not required to run)
