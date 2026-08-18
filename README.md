@@ -4,6 +4,9 @@
 Sheet, scrapes **closed** 2m / 3m / 5m footprint candles, and writes them back
 into that same spreadsheet. The process is meant to run unattended on a VPS.
 
+Handing this to a client on a **Windows laptop** that is powered on each
+morning (not left on 24×7): [`WINDOWS.md`](WINDOWS.md).
+
 GoCharting login is AWS Cognito over HTTPS (no browser). Market data is the
 WebSocket + Protobuf protocol documented in
 [`investigation/FINDINGS.md`](investigation/FINDINGS.md).
@@ -72,12 +75,18 @@ ONCE=1 npm start       # one config read + one sample, then exit
 npm test
 ```
 
+On Windows, do not use `ONCE=1 npm start` in Command Prompt. Double-click
+`start.bat` each morning, or `start-once.bat` for the smoke test. Full
+client steps are in [`WINDOWS.md`](WINDOWS.md).
+
 Errors go to [`logs/error.log`](logs/README.md) (redacted) and stdout.
 [`logs/status.json`](logs/README.md) is a small heartbeat for the VPS.
 
 A systemd unit is in [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service).
 Clone, Google Sheet setup, first run, and VPS/systemd/Docker deploy are in
-[`INSTRUCTIONS.md`](INSTRUCTIONS.md).
+[`INSTRUCTIONS.md`](INSTRUCTIONS.md). Handing the project to a client on a
+Windows PC that is not on 24×7: [`WINDOWS.md`](WINDOWS.md) (double-click
+`start.bat` each morning).
 
 ## Protocol notes
 

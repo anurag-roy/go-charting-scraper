@@ -1,0 +1,2 @@
+# Checkout Windows launchers with CRLF so double-click works on client PCs.
+*.bat text eol=crlf
