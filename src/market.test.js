@@ -56,6 +56,13 @@ describe('workForInstrument', () => {
       workForInstrument(NSE, sat, { backfilledSessionDate: '2026-08-14' }).action,
       'idle',
     );
+    assert.equal(workForInstrument(NSE, sat, {}).action, 'idle');
+  });
+
+  it('does not backfill a previous weekday before the next open', () => {
+    const mondayMorning = Date.parse('2026-08-17T08:00:00+05:30');
+    assert.equal(persistSessionDate(mondayMorning, { open: '09:15' }), '2026-08-14');
+    assert.equal(workForInstrument(NSE, mondayMorning, {}).action, 'idle');
   });
 });
 

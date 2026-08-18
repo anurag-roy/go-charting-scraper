@@ -4,11 +4,10 @@ import readline from 'node:readline';
 import {
   COLUMNS,
   csvRowKey,
-  isLegacyVwapHeader,
-  isPrefixHeader,
   parseCsvLine,
   rowToCsvLine,
   selectNewCsvRows,
+  shouldRewriteHeader,
 } from './columns.js';
 
 function readHeaderLine(filePath) {
@@ -42,7 +41,7 @@ export class CsvSink {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     if (fs.existsSync(this.filePath) && fs.statSync(this.filePath).size > 0) {
       const header = parseCsvLine(readHeaderLine(this.filePath));
-      if (isPrefixHeader(header, COLUMNS) || isLegacyVwapHeader(header, COLUMNS)) {
+      if (shouldRewriteHeader(header, COLUMNS)) {
         rewriteHeaderLine(this.filePath, COLUMNS);
       }
       await this.#loadKeys();

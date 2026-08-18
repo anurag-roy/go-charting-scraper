@@ -20,7 +20,7 @@ export function candleToRow({
   const high = bar ? bar.high : (candle ? stats.fp_high : '');
   const low = bar ? bar.low : (candle ? stats.fp_low : '');
   const oi = bar ? oiFields(bar, ohlcBars) : { oi: '', oi_change: '' };
-  const vwap1 = bar && vwapMap ? (vwapMap.get(bar.time) ?? '') : '';
+  const vwap = bar && vwapMap ? (vwapMap.get(bar.time) ?? '') : '';
   return {
     sampled_at_utc,
     sampled_at_ist,
@@ -55,8 +55,7 @@ export function candleToRow({
     volume: candle ? stats.volume : '',
     oi: oi.oi,
     oi_change: oi.oi_change,
-    vwap1,
-    vwap2: candle ? stats.vwap2 : '',
+    vwap,
   };
 }
 

@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   configFingerprint,
+  MAX_INSTRUMENTS,
   normalizeConfigKey,
   parseConfigRows,
   parseInstrumentId,
@@ -42,13 +43,21 @@ describe('parseConfigRows', () => {
       ['Instrument1', 'NSE:FUTURE:NIFTY-I'],
       ['Instrument2', 'MCX:FUTURE:CRUDEOIL-I'],
       ['Instrument3', 'NSE:OPTIONS:NIFTY2681824300CE'],
+      ['Instrument4', 'NSE:FUTURE:BANKNIFTY-I'],
+      ['Instrument5', 'BSE:FUTURE:SENSEX-I'],
+      ['Instrument6', 'MCX:FUTURE:GOLD-I'],
+      ['Instrument7', 'NSE:FUTURE:SHOULD-IGNORE'],
     ]);
+    assert.equal(MAX_INSTRUMENTS, 6);
     assert.equal(cfg.email, 'trader@example.com');
     assert.equal(cfg.password, 'secret');
     assert.deepEqual(cfg.instruments.map((i) => i.id), [
       'NSE:FUTURE:NIFTY-I',
       'MCX:FUTURE:CRUDEOIL-I',
       'NSE:OPTIONS:NIFTY2681824300CE',
+      'NSE:FUTURE:BANKNIFTY-I',
+      'BSE:FUTURE:SENSEX-I',
+      'MCX:FUTURE:GOLD-I',
     ]);
     assert.deepEqual(cfg.errors, []);
   });

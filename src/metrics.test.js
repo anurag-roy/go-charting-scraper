@@ -22,7 +22,7 @@ describe('footprintMetrics', () => {
     assert.equal(m.volume, 150);
     assert.equal(m.poc, 100);
     assert.equal(m.values_match, true);
-    assert.equal(m.vwap2, 100.27);
+    assert.equal(m.vwap2, undefined);
   });
 });
 
@@ -36,7 +36,7 @@ describe('oiFields', () => {
   });
 });
 
-describe('session VWAP (vwap1)', () => {
+describe('session VWAP (vwap)', () => {
   it('uses typical price (H+L+C)/3 and resets daily', () => {
     assert.equal(typicalPrice({ high: 12, low: 6, close: 9 }), 9);
     const map = vwapByCandleTime([

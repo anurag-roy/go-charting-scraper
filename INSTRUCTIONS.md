@@ -55,8 +55,7 @@ the market-data WebSocket, and for each configured instrument persists every
 | `poc` | Point of control (price with most buy+sell volume) |
 | `volume` | Footprint candle volume |
 | `oi_change` | This bar’s open interest minus the previous bar’s |
-| `vwap1` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
-| `vwap2` | Per-bar VWAP from footprint price levels (ticks) |
+| `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
 
 The in-progress (forming) candle is **not** written. After a bar’s end the
 process waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the
@@ -155,10 +154,14 @@ are case-insensitive):
 | Instrument1 | `NSE:FUTURE:NIFTY-I` |
 | Instrument2 | `MCX:FUTURE:CRUDEOIL-I` |
 | Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` |
+| Instrument4 | *(optional)* |
+| Instrument5 | *(optional)* |
+| Instrument6 | *(optional)* |
 
 Instrument strings are `EXCHANGE:CATEGORY:SYMBOL` (`NSE`, `BSE`, or `MCX`).
 Slashes (`NSE/FUTURE/NIFTY-I`) are also accepted. Blank instrument slots are
-ignored. Duplicate instruments are monitored once.
+ignored. Duplicate instruments are monitored once. At most six instruments
+(`Instrument1`–`Instrument6`) are read; extra slots are ignored.
 
 The password is **plaintext in the spreadsheet**. Share the file only with
 people who should have that GoCharting login, plus the service account.
@@ -274,8 +277,9 @@ ONCE=1 npm start
 ```
 
 `ONCE=1` means: read `config`, authenticate, create any missing
-`{symbol} 2m/3m/5m` tabs, backfill already-closed candles for the current (or
-last weekday) session, then exit. Use this as a smoke test before systemd.
+`{symbol} 2m/3m/5m` tabs, drop rows that are not from **today’s IST date**,
+backfill already-closed candles for today’s session (if the market is open
+or already closed today), then exit. Use this as a smoke test before systemd.
 
 ### Success looks like
 
@@ -356,14 +360,15 @@ or category):
 | `NSE:OPTIONS:NIFTY2681824300CE` | `NIFTY2681824300CE 2m`, … |
 
 The `config` tab is never renamed. Missing data tabs are created on first
-monitor. Existing `candle_time` values are not duplicated.
+monitor. Existing `candle_time` values are not duplicated. Each data tab
+keeps **only the current IST day’s rows** — previous-day candles are deleted
+when the calendar date changes (typically overnight / early morning).
 
-Sheet schema (10 columns) is listed in [§1](#1-what-you-get). Optional CSV
+Sheet schema (9 columns) is listed in [§1](#1-what-you-get). Optional CSV
 (`WRITE_CSV=1`) keeps a wider debug schema including OHLC and recompute
 columns.
 
-Prices and POC are **integer ticks** as sent by the feed. Chart UI often
-shows `round(ticks/100)` rupees for `vwap2`.
+Prices and POC are **integer ticks** as sent by the feed.
 
 ---
 
@@ -390,8 +395,10 @@ The process does **not** exit at 15:40 or on weekends:
 - Shortly after close: one more sample to catch the last bars, then backfill
   is marked done.
 - Overnight / weekend: close the WebSocket, keep polling `config` every 5s,
-  reconnect at the next weekday open.
-- Process start after hours: backfill the last weekday session once, then idle.
+  reconnect at the next weekday open. Previous-day sheet rows are cleared
+  when the IST calendar date changes.
+- Process start after hours on a **trading day**: backfill that same day’s
+  session once, then idle. Previous weekdays are not backfilled.
 
 Empty `closed=0` on a holiday is expected.
 
@@ -399,15 +406,16 @@ Empty `closed=0` on a holiday is expected.
 
 ## 12. Changing instruments
 
-Edit `Instrument1` / `Instrument2` / `Instrument3` on the `config` tab. Within
+Edit `Instrument1` … `Instrument6` on the `config` tab. Within
 about 5 seconds the process:
 
 1. Stops requesting the old symbol (X).
 2. Creates `{Y} 2m`, `{Y} 3m`, `{Y} 5m` if they do not exist.
-3. Backfills Y for the current (or last weekday) session.
+3. Backfills Y for **today’s** session (if today is a trading day).
 4. Starts live monitoring of Y.
 
-**X’s tabs are not deleted.** Historical rows stay.
+**X’s tabs are not deleted.** Historical rows on X stay until the next IST
+date change, when every data tab is reduced to the current day only.
 
 If the email/password cells change, the new login is attempted first. A bad
 password is logged and the previous Cognito session is kept.
@@ -537,6 +545,8 @@ covers that).
 - It does **not** subscribe to the live `trade` tape; it re-fetches footprint
   snapshots. That is enough for 15s polling of 2m/3m/5m bars.
 - It does **not** delete old symbol tabs when you change an instrument.
+- It **does** delete previous-day candle rows each IST morning so tabs hold
+  only the current day.
 - It does **not** take GoCharting credentials from `.env`.
 
 ---
@@ -552,7 +562,7 @@ covers that).
 | `cognito auth failed` / `NotAuthorizedException` | Bad sheet password | Confirm the `config` email/password. Cognito does not open a login UI. |
 | `cognito extra challenge` | MFA | Only `USER_PASSWORD_AUTH` with no challenge is supported. |
 | `ws unexpected HTTP 401` / connect timeout | JWT rejected or WSS blocked | Egress to `origin.ws.prodb.blr1.gocharting.com`. Watch journal for `connecting websocket`. |
-| `closed=0` / `no candles` | Holiday, wrong symbol, or before first bar | Confirm the instrument string in the GoCharting UI. After hours, a backfill of the last weekday is expected. |
+| `closed=0` / `no candles` | Holiday, wrong symbol, or before first bar | Confirm the instrument string in the GoCharting UI. After hours **today**, a backfill of today’s session is expected; previous weekdays are not rewritten. |
 | No new NSE rows after 15:40 | Last bars already flushed | Wait until 15:40 + `CLOSE_GRACE_MS`. MCX may still be live. |
 | Duplicate worry on restart | — | Keys are reloaded from each tab; a second `ONCE=1` should write 0. |
 | New instrument, no new tabs | Service account cannot write | Re-share the spreadsheet as Editor. `journalctl` / `logs/error.log`. |
@@ -629,7 +639,7 @@ cp .env.example .env
 # edit .env: GOOGLE_SHEET_ID + GOOGLE_SERVICE_ACCOUNT_JSON
 # (or GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY)
 # Share the spreadsheet with the service account as Editor.
-# Fill the config tab: email, password, Instrument1..3.
+# Fill the config tab: email, password, Instrument1..6.
 
 ONCE=1 npm start
 ```

@@ -14,14 +14,16 @@ WebSocket + Protobuf protocol documented in
    API allowance is 60 reads/minute/user).
 2. Authenticates with the email/password from that tab and keeps the JWT in
    process memory only (refresh before expiry; never written to disk).
-3. Tracks up to three instruments (`Instrument1`–`Instrument3`) in
+3. Tracks up to six instruments (`Instrument1`–`Instrument6`) in
    `EXCHANGE:CATEGORY:SYMBOL` form (`NSE`, `BSE`, or `MCX`).
 4. For each instrument, writes **closed** 2m / 3m / 5m candles to tabs named
    `{symbol} 2m`, `{symbol} 3m`, `{symbol} 5m` — for example
-   `NIFTY2681824300CE 2m`. Forming bars are never written.
+   `NIFTY2681824300CE 2m`. Forming bars are never written. Each tab keeps
+   **only the current IST day’s rows**; previous-day candles are deleted in
+   the morning.
 5. If an instrument changes from X to Y, monitoring switches to Y and new tabs
-   are created. X’s tabs are left in place. Y is backfilled for the current
-   (or last weekday) session.
+   are created. X’s tabs are left in place. Y is backfilled for **today’s**
+   session only (not previous weekdays).
 6. Stays running overnight and on weekends. NSE/BSE are sampled 09:15–15:40
    IST; MCX energy-style contracts 09:00–23:30 IST (23:55 while US Eastern is
    on daylight saving). Outside those windows the websocket is closed.
@@ -37,6 +39,9 @@ Create a tab named `config` with labels in column A and values in column B:
 | Instrument1 | `NSE:FUTURE:NIFTY-I` |
 | Instrument2 | `MCX:FUTURE:CRUDEOIL-I` |
 | Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` |
+| Instrument4 | *(optional)* |
+| Instrument5 | *(optional)* |
+| Instrument6 | *(optional)* |
 
 Share the spreadsheet with the service-account email as **Editor**. The
 password is stored in the sheet in plaintext — share the file only with people
@@ -55,8 +60,7 @@ Each `{symbol} 2m` / `3m` / `5m` tab uses this schema:
 | `poc` | Point of control |
 | `volume` | Footprint candle volume |
 | `oi_change` | Change in open interest vs the previous OHLC bar |
-| `vwap1` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
-| `vwap2` | Per-bar footprint VWAP (ticks) |
+| `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
 
 ## Run
 
