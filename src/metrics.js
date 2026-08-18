@@ -37,8 +37,6 @@ export function footprintMetrics(candle) {
   let pocVolume = -1;
   let fpHigh = -Infinity;
   let fpLow = Infinity;
-  let vwapPv = 0;
-  let vwapVol = 0;
 
   for (const l of levels) {
     const b = num(l.buy?.volume);
@@ -58,8 +56,6 @@ export function footprintMetrics(candle) {
       poc = px;
     }
     if (tot > 0) {
-      vwapPv += px * tot;
-      vwapVol += tot;
       if (px > fpHigh) fpHigh = px;
       if (px < fpLow) fpLow = px;
     }
@@ -107,7 +103,6 @@ export function footprintMetrics(candle) {
     delta_match: delta === deltaRecomputed,
     fp_high: esHigh || (Number.isFinite(fpHigh) ? fpHigh : ''),
     fp_low: esLow || (Number.isFinite(fpLow) ? fpLow : ''),
-    vwap2: vwapVol > 0 ? Number((vwapPv / vwapVol).toFixed(2)) : '',
   };
 }
 
@@ -153,6 +148,7 @@ function sessionDateKey(bar) {
   return String(bar?.time || '').slice(0, 10);
 }
 
+/** Session VWAP from typical price `(H+L+C)/3` × OHLC volume (sheet column `vwap`). */
 export function vwapByCandleTime(bars, { decimals = 2 } = {}) {
   const map = new Map();
   const grouped = new Map();

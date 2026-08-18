@@ -8,9 +8,10 @@ export const SHEET_COLUMNS = [
   'poc',
   'volume',
   'oi_change',
-  'vwap1',
-  'vwap2',
+  'vwap',
 ];
+
+const VWAP_HEADER_ALIASES = ['vwap', 'vwap1', 'vwap2'];
 
 /** Wider debug schema for optional local CSV. */
 export const COLUMNS = [
@@ -46,8 +47,7 @@ export const COLUMNS = [
   'volume',
   'oi',
   'oi_change',
-  'vwap1',
-  'vwap2',
+  'vwap',
 ];
 
 export function csvRowKey(symbol, interval, candleTime) {
@@ -157,6 +157,13 @@ export function selectNewCsvRows(keys, rows) {
   return out;
 }
 
+export function headersMatch(header, columns) {
+  return Array.isArray(header)
+    && Array.isArray(columns)
+    && header.length === columns.length
+    && header.every((h, i) => h === columns[i]);
+}
+
 export function isPrefixHeader(header, columns) {
   return Array.isArray(header)
     && header.length > 0
@@ -164,8 +171,45 @@ export function isPrefixHeader(header, columns) {
     && header.every((h, i) => h === columns[i]);
 }
 
+function vwapLegacyHeaders(columns) {
+  const base = (columns || []).filter((c) => !VWAP_HEADER_ALIASES.includes(c));
+  return [
+    [...base, 'vwap'],
+    [...base, 'vwap1'],
+    [...base, 'vwap1', 'vwap2'],
+  ];
+}
+
+/** Previous schemas used a trailing `vwap`, `vwap1`, or `vwap1`+`vwap2`. */
 export function isLegacyVwapHeader(header, columns) {
-  if (!Array.isArray(header) || header.length !== columns.length - 1) return false;
-  const legacy = columns.slice(0, -2).concat(['vwap']);
-  return header.every((h, i) => h === legacy[i]);
+  if (!Array.isArray(header) || !header.length) return false;
+  if (headersMatch(header, columns)) return false;
+  return vwapLegacyHeaders(columns).some((legacy) => headersMatch(header, legacy));
+}
+
+export function shouldRewriteHeader(header, columns) {
+  if (!Array.isArray(header) || !header.length) return true;
+  if (headersMatch(header, columns)) return false;
+  return isPrefixHeader(header, columns) || isLegacyVwapHeader(header, columns);
+}
+
+/** IST calendar date (`YYYY-MM-DD`) from a sheet `candle_time` value. */
+export function sheetCandleDate(iso) {
+  return formatSheetCandleTime(iso).slice(0, 10);
+}
+
+/**
+ * Project a stored sheet row onto the current column list.
+ * `vwap1` is copied into `vwap` when the live header is the old split schema.
+ */
+export function mapSheetRow(header, row, columns = SHEET_COLUMNS) {
+  const get = (name) => {
+    const i = (header || []).indexOf(name);
+    return i >= 0 ? (row?.[i] ?? '') : '';
+  };
+  return columns.map((col) => {
+    if (col === 'candle_time') return formatSheetCandleTime(get('candle_time'));
+    if (col === 'vwap') return get('vwap') || get('vwap1') || '';
+    return get(col);
+  });
 }

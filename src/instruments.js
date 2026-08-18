@@ -1,5 +1,12 @@
 const ALLOWED_EXCHANGES = new Set(['NSE', 'BSE', 'MCX']);
 
+/** Config tab slots `Instrument1` … `InstrumentN` (same A/B vertical layout). */
+export const MAX_INSTRUMENTS = 6;
+
+export function instrumentConfigKeys(max = MAX_INSTRUMENTS) {
+  return Array.from({ length: max }, (_, i) => `instrument${i + 1}`);
+}
+
 export function normalizeConfigKey(raw) {
   return String(raw || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
 }
@@ -40,7 +47,7 @@ export function parseConfigRows(rows) {
   const seen = new Set();
   const errors = [];
 
-  for (const key of ['instrument1', 'instrument2', 'instrument3']) {
+  for (const key of instrumentConfigKeys()) {
     const raw = String(map.get(key) || '').trim();
     if (!raw) continue;
     try {

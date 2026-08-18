@@ -70,8 +70,8 @@ export function earliestOpenMs(instruments, nowMs) {
  * Decide whether this instrument should be sampled now.
  *
  * - `sample`: live session (or just after close, to catch the last bars)
- * - `backfill`: closed session not yet persisted in this process
- * - `idle`: nothing to do
+ * - `backfill`: today's closed session not yet persisted in this process
+ * - `idle`: overnight, weekend, or a previous weekday (sheets keep only today)
  */
 export function workForInstrument(instrument, nowMs, state, {
   afterCloseBufferMs = 60_000,
@@ -90,7 +90,8 @@ export function workForInstrument(instrument, nowMs, state, {
   if (live || inCloseBuffer) {
     return { action: 'sample', persistDate, hours };
   }
-  if (state?.backfilledSessionDate !== persistDate) {
+  const today = istDateString(new Date(nowMs));
+  if (persistDate === today && state?.backfilledSessionDate !== persistDate) {
     return { action: 'backfill', persistDate, hours };
   }
   return { action: 'idle', persistDate, hours };

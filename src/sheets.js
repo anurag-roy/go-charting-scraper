@@ -1,12 +1,13 @@
 import { google } from 'googleapis';
 import {
   SHEET_COLUMNS,
-  isLegacyVwapHeader,
-  isPrefixHeader,
+  mapSheetRow,
   rowToSheetValues,
   selectNewSheetRows,
+  sheetCandleDate,
   sheetRowKey,
   sheetTabName,
+  shouldRewriteHeader,
 } from './columns.js';
 import { parseConfigRows } from './instruments.js';
 import { withRetry } from './util.js';
@@ -114,6 +115,22 @@ export class SheetsSink {
     }
   }
 
+  /**
+   * Keep only rows whose `candle_time` date is `dateStr` (`YYYY-MM-DD`).
+   * Also rewrites a legacy `vwap1`/`vwap2` header to `vwap`.
+   * Returns how many data rows were removed.
+   */
+  async retainSession(contract, intervals, dateStr) {
+    const tabs = (intervals || []).map((iv) => sheetTabName(contract, iv)).filter(Boolean);
+    await this.#ensureTabs(tabs);
+    let dropped = 0;
+    for (const tab of tabs) {
+      dropped += await this.#retainTabDate(tab, dateStr);
+      this.loadedTabs.add(tab);
+    }
+    return dropped;
+  }
+
   async #titles() {
     const meta = await withRetry(
       () => this.sheetsApi.spreadsheets.get({
@@ -140,38 +157,43 @@ export class SheetsSink {
     );
   }
 
+  async #writeHeader(tab) {
+    await withRetry(
+      () => this.sheetsApi.spreadsheets.values.update({
+        spreadsheetId: this.spreadsheetId,
+        range: sheetA1(tab, 'A1'),
+        valueInputOption: 'RAW',
+        requestBody: { values: [SHEET_COLUMNS] },
+      }),
+      retryOpts(this.log, `header ${tab}`),
+    );
+  }
+
+  #replaceTabKeys(tab, times) {
+    for (const k of [...this.keys]) {
+      if (k.startsWith(`${tab}\t`)) this.keys.delete(k);
+    }
+    for (const t of times || []) {
+      if (t) this.keys.add(sheetRowKey(tab, t));
+    }
+  }
+
   async #ensureHeaderAndLoadKeys(tab) {
     const res = await withRetry(
       () => this.sheetsApi.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: sheetA1(tab, 'A:J'),
+        range: sheetA1(tab, 'A:Z'),
       }),
       retryOpts(this.log, `read ${tab}`),
     );
     const values = res.data.values || [];
     if (!values.length) {
-      await withRetry(
-        () => this.sheetsApi.spreadsheets.values.update({
-          spreadsheetId: this.spreadsheetId,
-          range: sheetA1(tab, 'A1'),
-          valueInputOption: 'RAW',
-          requestBody: { values: [SHEET_COLUMNS] },
-        }),
-        retryOpts(this.log, `header ${tab}`),
-      );
+      await this.#writeHeader(tab);
       return;
     }
     const header = values[0] || [];
-    if (isPrefixHeader(header, SHEET_COLUMNS) || isLegacyVwapHeader(header, SHEET_COLUMNS)) {
-      await withRetry(
-        () => this.sheetsApi.spreadsheets.values.update({
-          spreadsheetId: this.spreadsheetId,
-          range: sheetA1(tab, 'A1'),
-          valueInputOption: 'RAW',
-          requestBody: { values: [SHEET_COLUMNS] },
-        }),
-        retryOpts(this.log, `header ${tab}`),
-      );
+    if (shouldRewriteHeader(header, SHEET_COLUMNS)) {
+      await this.#writeHeader(tab);
     }
     const iTime = header.indexOf('candle_time');
     for (const row of values.slice(1)) {
@@ -180,10 +202,59 @@ export class SheetsSink {
     }
   }
 
-  async #reloadTabKeys(tab) {
-    for (const k of [...this.keys]) {
-      if (k.startsWith(`${tab}\t`)) this.keys.delete(k);
+  async #retainTabDate(tab, dateStr) {
+    const res = await withRetry(
+      () => this.sheetsApi.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: sheetA1(tab, 'A:Z'),
+      }),
+      retryOpts(this.log, `read ${tab}`),
+    );
+    const values = res.data.values || [];
+    if (!values.length) {
+      await this.#writeHeader(tab);
+      this.#replaceTabKeys(tab, []);
+      return 0;
     }
+    const header = values[0] || [];
+    const rewriteHeader = shouldRewriteHeader(header, SHEET_COLUMNS);
+    const iTime = header.indexOf('candle_time');
+    const data = values.slice(1);
+    const kept = [];
+    for (const row of data) {
+      const t = iTime >= 0 ? row[iTime] : '';
+      if (t && sheetCandleDate(t) === dateStr) kept.push(row);
+    }
+    const dropped = data.length - kept.length;
+    const mapped = kept.map((row) => mapSheetRow(header, row));
+    const extraCols = data.some((row) => (row?.length || 0) > SHEET_COLUMNS.length);
+    if (rewriteHeader || dropped > 0 || extraCols) {
+      if (rewriteHeader) await this.#writeHeader(tab);
+      await withRetry(
+        () => this.sheetsApi.spreadsheets.values.clear({
+          spreadsheetId: this.spreadsheetId,
+          range: sheetA1(tab, 'A2:Z'),
+        }),
+        retryOpts(this.log, `clear ${tab}`),
+      );
+      if (mapped.length) {
+        await withRetry(
+          () => this.sheetsApi.spreadsheets.values.update({
+            spreadsheetId: this.spreadsheetId,
+            range: sheetA1(tab, 'A2'),
+            valueInputOption: 'RAW',
+            requestBody: { values: mapped },
+          }),
+          retryOpts(this.log, `rewrite ${tab}`),
+        );
+      }
+    }
+    this.#replaceTabKeys(tab, mapped.map((row) => row[0]));
+    return dropped;
+  }
+
+  async #reloadTabKeys(tab) {
+    this.#replaceTabKeys(tab, []);
     this.loadedTabs.delete(tab);
     await this.#ensureHeaderAndLoadKeys(tab);
     this.loadedTabs.add(tab);

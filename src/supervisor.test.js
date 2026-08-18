@@ -30,6 +30,7 @@ describe('Supervisor instrument hot-swap', () => {
       dropInstrument(symbol, intervals) {
         dropped.push({ symbol, intervals: [...intervals] });
       },
+      async retainSession() { return 0; },
       async writeRows() { return 0; },
     };
     const client = {
@@ -78,6 +79,7 @@ describe('Supervisor instrument hot-swap', () => {
     const sink = {
       async ensureInstrument() {},
       dropInstrument() {},
+      async retainSession() { return 0; },
       async writeRows(rows) { return rows.length; },
     };
     const client = {
@@ -127,5 +129,46 @@ describe('Supervisor instrument hot-swap', () => {
     assert.ok(requested.includes('MCX:FUTURE:CRUDEOIL-I:2m'));
     assert.equal(wrote > 0, true);
     assert.equal(supervisor.instrumentState.get(y.id).backfilledSessionDate, '2026-08-17');
+  });
+
+  it('drops previous-day sheet rows when the IST date changes', async () => {
+    const retained = [];
+    const x = parseInstrumentId('NSE:FUTURE:NIFTY-I');
+    let nowMs = Date.parse('2026-08-17T10:00:00+05:30');
+    const supervisor = new Supervisor({
+      cfg: {
+        intervals: ['2m', '3m', '5m'],
+        sampleMs: 15_000,
+        closeGraceMs: 2000,
+        afterCloseBufferMs: 60_000,
+        wsHost: 'wss://example',
+        wsTag: 't',
+        statusPath: '',
+      },
+      log: silentLog(),
+      configSheet: { read: async () => ({}) },
+      sink: {
+        async ensureInstrument() {},
+        dropInstrument() {},
+        async retainSession(symbol, intervals, dateStr) {
+          retained.push({ symbol, dateStr, intervals: [...intervals] });
+          return dateStr === '2026-08-18' ? 4 : 0;
+        },
+        async writeRows() { return 0; },
+      },
+      auth: mockAuth(),
+      client: { isOpen: () => false, dropSymbol() {}, async disconnect() {}, async connect() {} },
+      now: () => nowMs,
+    });
+
+    await supervisor.reconcile([x]);
+    assert.equal(retained.at(-1).dateStr, '2026-08-17');
+    assert.equal(supervisor.instrumentState.get(x.id).retainedDate, '2026-08-17');
+
+    nowMs = Date.parse('2026-08-18T08:00:00+05:30');
+    const dropped = await supervisor.retainCurrentDay();
+    assert.equal(dropped, 4);
+    assert.equal(retained.at(-1).dateStr, '2026-08-18');
+    assert.equal(supervisor.instrumentState.get(x.id).retainedDate, '2026-08-18');
   });
 });

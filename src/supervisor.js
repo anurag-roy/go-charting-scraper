@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import WebSocket from 'ws';
 import { configFingerprint, configSummary, isUsableConfig, reconcileInstruments } from './instruments.js';
 import { earliestOpenMs, workForInstrument } from './market.js';
-import { formatIst, sessionDatesFor } from './session.js';
+import { formatIst, istDateString, sessionDatesFor } from './session.js';
 import { sampleInstruments } from './collect.js';
 import { writeStatus } from './log.js';
 import { interruptibleSleep } from './util.js';
@@ -240,18 +240,36 @@ export class Supervisor {
     for (const inst of added) {
       this.log.info('start monitoring', inst.id);
       await this.sink.ensureInstrument(inst.symbol, this.cfg.intervals);
-      this.instrumentState.set(inst.id, { backfilledSessionDate: null });
+      this.instrumentState.set(inst.id, { backfilledSessionDate: null, retainedDate: null });
       this.nextSampleAt = 0;
       this.#wakeSampleLoop();
     }
     this.liveInstruments = instruments;
+    await this.retainCurrentDay();
     if (!instruments.length && this.client?.isOpen?.()) {
       await this.client.disconnect();
     }
   }
 
+  /** Drop sheet rows that are not from today's IST calendar date. */
+  async retainCurrentDay() {
+    const today = istDateString(new Date(this.now()));
+    let dropped = 0;
+    for (const inst of this.liveInstruments) {
+      const state = this.instrumentState.get(inst.id) || {};
+      if (state.retainedDate === today) continue;
+      const n = await this.sink.retainSession(inst.symbol, this.cfg.intervals, today);
+      if (n > 0) this.log.info(`removed ${n} previous-day row(s) for ${inst.id}`);
+      state.retainedDate = today;
+      this.instrumentState.set(inst.id, state);
+      dropped += n;
+    }
+    return dropped;
+  }
+
   async sampleDue(force) {
     return this.#withLock(async () => {
+      await this.retainCurrentDay();
       const nowMs = this.now();
       const due = this.#dueInstruments(nowMs);
       if (!due.length) {
