@@ -1,18 +1,16 @@
-# GoCharting scraper — full setup & run instructions
+# GoCharting scraper — setup and VPS deploy
 
-**Production entrypoint:** `src/index.js` (`npm start`). It runs 24×7, reads
-`email` / `password` / `Instrument1..3` from the Google Sheet `config` tab, and
-writes closed 2m / 3m / 5m candles to tabs named `{symbol} 2m` (etc.). See
-[`README.md`](README.md) for the product behaviour.
-
-This document also covers the older single-symbol PoC
-(`investigation/poc-log-maxvol.js`) and protocol capture scripts.
+This is the end-to-end guide for running the **24×7 Google Sheet service**.
+The process lives on your VPS, reads GoCharting credentials and instruments
+from a spreadsheet `config` tab, and writes **closed** 2m / 3m / 5m candles
+back into that same spreadsheet.
 
 Related reading:
 
-- [`README.md`](README.md) — 24×7 Google Sheet service
-- [`investigation/FINDINGS.md`](investigation/FINDINGS.md) — WebSocket + Protobuf
-- [`.env.example`](.env.example) — `GOOGLE_SHEET_ID` and service-account keys
+- [`README.md`](README.md) — one-page product summary
+- [`.env.example`](.env.example) — Google credentials and optional knobs
+- [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service) — systemd unit
+- [`investigation/FINDINGS.md`](investigation/FINDINGS.md) — WebSocket + Protobuf protocol (not required to run)
 
 ---
 
@@ -20,62 +18,54 @@ Related reading:
 
 1. [What you get](#1-what-you-get)
 2. [How the scraper works](#2-how-the-scraper-works)
-3. [What you need before cloning](#3-what-you-need-before-cloning)
-4. [Clone the repository](#4-clone-the-repository)
-5. [Install Node.js](#5-install-nodejs)
-6. [Install project dependencies](#6-install-project-dependencies)
-7. [Optional: Playwright for capture scripts](#7-optional-playwright-for-capture-scripts)
-8. [Configure credentials](#8-configure-credentials)
-9. [First successful scrape](#9-first-successful-scrape)
-10. [Environment variables](#10-environment-variables)
-11. [CSV output](#11-csv-output)
-12. [Google Sheets](#12-google-sheets)
-13. [Common recipes](#13-common-recipes)
-14. [Linux server / unattended deploy](#14-linux-server--unattended-deploy)
-15. [Docker](#15-docker)
+3. [What you need](#3-what-you-need)
+4. [Google Sheet (`config` tab)](#4-google-sheet-config-tab)
+5. [Google Cloud service account](#5-google-cloud-service-account)
+6. [Clone and install](#6-clone-and-install)
+7. [Configure the VPS / laptop env](#7-configure-the-vps--laptop-env)
+8. [First successful run](#8-first-successful-run)
+9. [Environment variables](#9-environment-variables)
+10. [Candle tabs and columns](#10-candle-tabs-and-columns)
+11. [Market hours and 24×7 behaviour](#11-market-hours-and-24x7-behaviour)
+12. [Changing instruments](#12-changing-instruments)
+13. [Linux server (systemd)](#13-linux-server-systemd)
+14. [Docker](#14-docker)
+15. [Logs](#15-logs)
 16. [What the scraper does *not* do](#16-what-the-scraper-does-not-do)
-17. [Target (symbol / intervals)](#17-target-symbol--intervals)
-18. [Troubleshooting](#18-troubleshooting)
-19. [Investigation / debug scripts](#19-investigation--debug-scripts)
-20. [Security, git, and ToS](#20-security-git-and-tos)
+17. [Troubleshooting](#17-troubleshooting)
+18. [Security](#18-security)
+19. [Investigation scripts (optional)](#19-investigation-scripts-optional)
 
 ---
 
 ## 1. What you get
 
-The live scraper is `investigation/poc-log-maxvol.js`.
+Production entrypoint: `src/index.js` (`npm start`).
 
-It signs in with AWS Cognito over HTTPS (no browser), then requests footprint
-**and OHLC** data for **2m**, **3m**, and **5m** candles of
-`NSE:FUTURE:NIFTY-I` and writes every **closed** bar in the **09:15–15:40 IST**
-session:
+It signs in to GoCharting with AWS Cognito over HTTPS (**no browser**), opens
+the market-data WebSocket, and for each configured instrument persists every
+**closed** `2m`, `3m`, and `5m` footprint candle:
 
-| Field | Meaning |
+| Sheet column | Meaning |
 | --- | --- |
-| **OHLC** | Open / high / low / close of that candle (`TS/V2` `OHLCV/V2` bars) |
-| **Delta** | Buy volume minus sell volume for the candle (`ending_summary.close_delta`) |
-| **Max Delta** | Highest intra-bar cumulative delta (`ending_summary.max_delta`) |
-| **Max Vol B** | Largest **buy** volume at any single price level (`max.buy.volume`) |
-| **Max Vol S** | Largest **sell** volume at any single price level (`max.sell.volume`) |
-| **POC** | Point of control: price level with the most total (buy+sell) volume |
-| **Volume** | Footprint total volume (`totals.overall`, else buy+sell) |
-| **OI change** | This bar’s open interest minus the previous bar’s (`TS/V2` `oi`) |
-| **VWAP1** | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, reset each IST day |
-| **VWAP2** | Per-bar VWAP from footprint price levels (same as GoCharting bar statistics) |
+| `candle_time` | Candle open time in IST (no `+05:30` suffix) |
+| `delta` | Buy volume − sell volume |
+| `max_delta` | Intra-bar cumulative-delta high |
+| `max_vol_b` / `max_vol_s` | Largest buy / sell volume at any single price |
+| `poc` | Point of control (price with most buy+sell volume) |
+| `volume` | Footprint candle volume |
+| `oi_change` | This bar’s open interest minus the previous bar’s |
+| `vwap1` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
+| `vwap2` | Per-bar VWAP from footprint price levels (ticks) |
 
-The in-progress (forming) candle is **not** written. After a bar's end time the
-scraper waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the print,
-then appends the row. Restarts skip candles already stored (by `interval` +
-`candle_time`).
+The in-progress (forming) candle is **not** written. After a bar’s end the
+process waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the
+print, then appends the row. Restarts skip `candle_time` values already on
+that tab.
 
-Default behaviour: on a weekday during market hours, sample every **15 seconds**
-until shortly after **15:40 IST**. `RUN_MS=0` is a one-shot backfill (cron-friendly).
-Weekends backfill the last weekday session and exit.
-
-At least one sink is required:
-
-- **Google Sheet** when `GOOGLE_SHEET_ID` is set (tabs like `NIFTY-I 5m`)
-- **Local CSV** when `WRITE_CSV=1`
+Default behaviour: run forever. While an exchange is in session, sample about
+every **15 seconds**. Overnight and on weekends the WebSocket is closed; the
+process stays up and keeps polling the `config` tab.
 
 Verified on Linux: Node 22, outbound HTTPS + WSS only (no Chromium, no Xvfb,
 no display).
@@ -84,735 +74,547 @@ no display).
 
 ## 2. How the scraper works
 
-You do **not** need to understand this to run it. It is here so the setup
-choices (outbound hosts, secrets) make sense.
+You do not need this to operate it. It explains outbound hosts and secrets.
 
-1. `POST` AWS Cognito `InitiateAuth` (`USER_PASSWORD_AUTH`) with
-   `GOCHARTING_EMAIL` / `GOCHARTING_PASSWORD` using the same public web client
-   id the website ships (`3fqhvm22ea8pjsr2spbnv484pr`, pool
-   `ap-south-1_uuM8MRslb`).
-2. Cognito returns a JWT **id token**. The market-data WebSocket is
+1. Every 5 seconds it reads the spreadsheet `config` tab (one Google **read**;
+   12/minute, under the Sheets API 60 reads/minute/user quota).
+2. It `POST`s AWS Cognito `InitiateAuth` (`USER_PASSWORD_AUTH`) with the
+   **email / password from the sheet**, using the same public web client id
+   the website ships (`3fqhvm22ea8pjsr2spbnv484pr`).
+3. Cognito returns a JWT **id token**. Tokens are kept **in process memory
+   only** (never written to disk). The market-data WebSocket is
    `wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws?token=<JWT>&tag=…`.
-3. The Node process opens that WebSocket (Origin `https://gocharting.com`).
-4. It sends JSON `FOOTPRINT/V2` commands for intervals `2m`, `3m`, `5m`, and
-   `TS/V2` `OHLCV/V2` for the same symbol/intervals.
-5. The server replies with **binary Protobuf** frames (sometimes
-   deflate-compressed). The script decodes them with
+4. The Node process opens that WebSocket (Origin `https://gocharting.com`).
+5. For each active instrument and interval it sends JSON `FOOTPRINT/V2` and
+   `TS/V2` `OHLCV/V2`.
+6. The server replies with **binary Protobuf** frames (sometimes deflate-
+   compressed). They are decoded with
    `investigation/evidence/footprint.proto` and
    `investigation/evidence/ohlc_bars.proto`.
-6. For each interval it keeps every **closed** candle whose open time is in the
-   09:15–15:40 IST window for the current (or last weekday) session, and writes
-   OHLC, delta / max delta, Max Vol B/S, POC, footprint volume, OI change, and
-   session VWAP (`vwap1`) and per-bar VWAP (`vwap2`) to Google Sheets and/or CSV.
-7. It also recomputes `max(level.buy.volume)` / `max(level.sell.volume)` and
-   records `values_match=true` when they agree with the server. OHLC bars are
-   matched to the footprint candle by timestamp (`start + offset` minutes).
+7. Closed candles in that exchange’s session window are appended to tabs
+   named `{symbol} 2m`, `{symbol} 3m`, `{symbol} 5m`.
 
-There is **no REST/JSON endpoint** for these numbers. Do not try to scrape
-them out of the DOM; the chart canvas does not expose them as text. A headless
-browser is also unnecessary: login is a single Cognito HTTP call.
+There is **no REST/JSON endpoint** for these numbers. Do not scrape the DOM.
+A headless browser is unnecessary: login is a single Cognito HTTP call.
 
 Cognito id tokens from this client currently last **8 hours** (`ExpiresIn`
 28800). The scraper refreshes with `REFRESH_TOKEN_AUTH` (or re-logins) when
 the JWT is near expiry or `TOKEN_REFRESH_MS` elapses (default 45 minutes).
+If the sheet password changes, the new credentials are tried first; on
+failure the previous working session is kept.
 
 ---
 
-## 3. What you need before cloning
+## 3. What you need
 
-### Account
+### Accounts
 
-- A working [GoCharting](https://gocharting.com) login that can access
-  `NSE:FUTURE:NIFTY-I` footprint data.
+- A working [GoCharting](https://gocharting.com) login that can see the
+  instruments you put on the `config` tab.
+- A Google spreadsheet shared with a **service account** as Editor.
 
 ### Machine
 
 | Item | Recommendation |
 | --- | --- |
 | OS | Ubuntu 22.04 / 24.04 (Debian 12 is fine). macOS / any Node 20+ host. |
-| CPU / RAM | Tiny: **~128–256 MB** is enough. No Chrome. |
-| Disk | ~50 MB for Node deps; plus CSV growth. |
+| CPU / RAM | Tiny: **~128–256 MB**. No Chrome. |
+| Disk | ~50 MB for Node deps; plus log growth. |
 | Display | **Not required.** |
-| Privileges | A normal user is enough. |
+| Privileges | A normal user is enough to run; systemd install needs root. |
 
 ### Network (outbound)
-
-The host must reach at least:
 
 | Host | Why |
 | --- | --- |
 | `cognito-idp.ap-south-1.amazonaws.com` (HTTPS) | Auth / JWT |
 | `origin.ws.prodb.blr1.gocharting.com` (WSS `443`) | Market data |
-| `sheets.googleapis.com` (HTTPS) | Only if using Google Sheets |
+| `sheets.googleapis.com` (HTTPS) | Read `config`, write candle tabs |
 
-The investigation / capture scripts (not the live scraper) also need
-`gocharting.com` and `cdn.playwright.dev` if you re-run Playwright captures.
-
-### Software you must have (or will install below)
+### Software
 
 - `git`
 - **Node.js 20 or 22** (22 is what this was developed on)
 - `npm` (comes with Node)
 
-Optional:
-
-- Playwright Chromium — **only** for `investigate.js` / `capture-frames.js`
-  (protocol re-capture). The live scraper does not use it.
-- `docker` — see [§15](#15-docker)
-
-### Market hours (so “empty” values make sense)
-
-NSE / Nifty futures **RTH** is **09:15–15:40 IST**, Monday–Friday. The scraper
-only persists candles that open in that window. Last bars: **5m 15:35**,
-**3m 15:39**, **2m 15:39**. A 2-minute last bar may be shorter than 2 minutes
-(session length is 385 minutes); it is treated as closed at 15:40. After the
-close, or on a weekend, a one-shot run backfills the last completed session.
-That is real data, not a scraper bug.
+Optional: Docker ([§14](#14-docker)). Playwright is **not** used by the live
+scraper.
 
 ---
 
-## 4. Clone the repository
+## 4. Google Sheet (`config` tab)
 
-```bash
-git clone https://github.com/anurag-roy/go-charting-scraper.git
-cd go-charting-scraper
-```
+Create (or reuse) a spreadsheet. Add a tab named exactly **`config`**.
+Put labels in column A and values in column B (order does not matter; keys
+are case-insensitive):
 
-If you are deploying a specific branch (for example the Max Vol POC branch):
+| A | B (example) |
+| --- | --- |
+| email | GoCharting login email |
+| password | GoCharting password |
+| Instrument1 | `NSE:FUTURE:NIFTY-I` |
+| Instrument2 | `MCX:FUTURE:CRUDEOIL-I` |
+| Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` |
 
-```bash
-git clone https://github.com/anurag-roy/go-charting-scraper.git
-cd go-charting-scraper
-git checkout cursor/maxvol-poc-csv-c8af   # or main, once merged
-```
+Instrument strings are `EXCHANGE:CATEGORY:SYMBOL` (`NSE`, `BSE`, or `MCX`).
+Slashes (`NSE/FUTURE/NIFTY-I`) are also accepted. Blank instrument slots are
+ignored. Duplicate instruments are monitored once.
 
-Layout you will use:
+The password is **plaintext in the spreadsheet**. Share the file only with
+people who should have that GoCharting login, plus the service account.
+Do not make the sheet public.
 
-```
-go-charting-scraper/
-  .env.example             ← copy to .env (gitignored)
-  INSTRUCTIONS.md          ← this file
-  README.md
-  investigation/
-    poc-log-maxvol.js      ← the scraper
-    package.json
-    lib/                   ← .env, session window, CSV + Sheets sinks
-    evidence/
-      footprint.proto      ← Protobuf schema used to decode footprint frames
-      ohlc_bars.proto      ← Protobuf schema used to decode OHLC bars
-      maxvol-poc.csv       ← example scrape (includes OHLC)
-    out/                   ← gitignored; debug logs
+Copy the spreadsheet id from the URL:
+
+```text
+https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit
 ```
 
 ---
 
-## 5. Install Node.js
+## 5. Google Cloud service account
 
-Check first:
+One-time:
+
+1. Create a Google Cloud project (or reuse one).
+2. Enable the **Google Sheets API**.
+3. Create a **service account** and download its JSON key. Keep it **out of
+   git** (for example `/etc/gocharting/google-service-account.json`).
+4. Share the spreadsheet with the service account’s `client_email` as
+   **Editor**.
+
+You can authenticate the scraper either with that JSON file
+(`GOOGLE_SERVICE_ACCOUNT_JSON`) or with `GOOGLE_CLIENT_EMAIL` +
+`GOOGLE_PRIVATE_KEY`. On systemd, the **JSON file is easier** because PEM
+newlines are awkward in `EnvironmentFile=`.
+
+---
+
+## 6. Clone and install
 
 ```bash
+git clone https://github.com/anurag-roy/go-charting-scraper.git
+cd go-charting-scraper
 node -v    # want v20.x or v22.x
-npm -v
+npm ci     # from the repo root — that is where package.json lives
 ```
 
 If Node is missing, on Ubuntu/Debian (Node 22):
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl gnupg
+sudo apt-get install -y ca-certificates curl gnupg git
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs
-node -v
 ```
 
-Alternatives: [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or
-your distro’s `nodejs` package if it is ≥ 20.
+Layout you will use:
 
----
-
-## 6. Install project dependencies
-
-From the **repo root** (24×7 service):
-
-```bash
-npm ci          # preferred: exact lockfile versions
-# if npm ci fails (no lock / dirty tree): npm install
 ```
-
-The older PoC and capture scripts still use `investigation/package.json`:
-
-```bash
-cd investigation
-npm ci
-```
-
-This installs `dotenv`, `googleapis`, `protobufjs`, `pako`, `ws`, and
-`playwright` into `investigation/node_modules/` (gitignored). Playwright is
-only used by the optional capture scripts in
-[§19](#19-investigation--debug-scripts). The live scraper does **not** launch
-a browser and does **not** need `npx playwright install`.
-
----
-
-## 7. Optional: Playwright for capture scripts
-
-Skip this for the live scraper. Only if you re-run `investigate.js` /
-`capture-frames.js`:
-
-```bash
-npx playwright install --with-deps chromium
+go-charting-scraper/
+  package.json                 ← production app
+  src/index.js                 ← 24×7 entrypoint
+  .env.example                 ← copy to .env (gitignored)
+  deploy/gocharting-scraper.service
+  logs/                        ← error.log + status.json at runtime
+  investigation/evidence/      ← Protobuf schemas the decoder needs
 ```
 
 ---
 
-## 8. Configure credentials
+## 7. Configure the VPS / laptop env
 
-The scraper **refuses to start** without GoCharting credentials **and** at least
-one output sink (`GOOGLE_SHEET_ID` and/or `WRITE_CSV=1`):
+The scraper **refuses to start** without a spreadsheet id and Google
+credentials (exit code `2`):
 
 ```text
-missing GOCHARTING_EMAIL / GOCHARTING_PASSWORD
-set GOOGLE_SHEET_ID (spreadsheet id or URL) and/or WRITE_CSV=1
+set GOOGLE_SHEET_ID (spreadsheet id or URL)
+Google credentials are missing (GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY)
 ```
 
-(exit code `2`).
+GoCharting email/password are **not** env vars. They come from the `config`
+tab.
 
-Values are read from the environment and from a gitignored `.env` file (repo
-root or `investigation/`). They are **redacted** from `investigation/out/`
-debug logs (email, password, JWTs, `token=` query params).
-
-### Recommended: `.env` in the repo (gitignored)
+### Laptop / first SSH: `.env` (gitignored)
 
 ```bash
 cp .env.example .env
 # edit .env — at minimum:
-#   GOCHARTING_EMAIL
-#   GOCHARTING_PASSWORD
-#   WRITE_CSV=1
-#   and/or GOOGLE_SHEET_ID + GOOGLE_SERVICE_ACCOUNT_JSON
+#   GOOGLE_SHEET_ID=your-spreadsheet-id-or-full-url
+#   GOOGLE_SERVICE_ACCOUNT_JSON=./google-service-account.json
+#     or GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY
 ```
 
-The scraper auto-loads `.env` via `dotenv` (`investigation/.env` overrides the
-repo-root file).
+The process auto-loads `.env` from the repo root via `dotenv`.
 
-### Interactive session (laptop or first SSH)
-
-```bash
-export GOCHARTING_EMAIL='you@example.com'
-export GOCHARTING_PASSWORD='your-password'
-export WRITE_CSV=1
-```
-
-Avoid putting the password in shell history:
-
-```bash
-read -s GOCHARTING_PASSWORD
-export GOCHARTING_PASSWORD
-```
-
-### Durable env file (server)
+### Durable env on the server
 
 ```bash
 sudo mkdir -p /etc/gocharting
+sudo cp /path/to/google-service-account.json /etc/gocharting/google-service-account.json
+sudo chmod 600 /etc/gocharting/google-service-account.json
+
 sudo tee /etc/gocharting/env >/dev/null <<'EOF'
-GOCHARTING_EMAIL=you@example.com
-GOCHARTING_PASSWORD=your-password
-WRITE_CSV=1
-CSV_PATH=/var/lib/gocharting/maxvol.csv
-OUT_DIR=/var/lib/gocharting/out
 GOOGLE_SHEET_ID=your-spreadsheet-id
 GOOGLE_SERVICE_ACCOUNT_JSON=/etc/gocharting/google-service-account.json
 EOF
 sudo chmod 600 /etc/gocharting/env
-sudo mkdir -p /var/lib/gocharting/out
 ```
 
-Load it:
-
-```bash
-set -a
-source /etc/gocharting/env
-set +a
-```
-
-Do **not** commit this file, `.env`, or the Google JSON key.
+Do **not** commit `.env`, `/etc/gocharting/env`, or the JSON key.
 
 ---
 
-## 9. First successful scrape
+## 8. First successful run
 
-From the repo root, with `.env` filled in (`WRITE_CSV=1` is the easiest first run):
+From the **repo root**, with `.env` filled in:
 
 ```bash
-cd /path/to/go-charting-scraper/investigation
-
-# One-shot: persist every already-closed 2m/3m/5m candle for the session
-RUN_MS=0 WRITE_CSV=1 node poc-log-maxvol.js
+ONCE=1 npm start
 ```
 
-`RUN_MS=0` means “take one sample and exit” (Cognito + one `FOOTPRINT/V2` /
-`TS/V2` round-trip per interval). Omit `RUN_MS` on a weekday to poll until
-15:40 IST.
+`ONCE=1` means: read `config`, authenticate, create any missing
+`{symbol} 2m/3m/5m` tabs, backfill already-closed candles for the current (or
+last weekday) session, then exit. Use this as a smoke test before systemd.
 
 ### Success looks like
 
 ```text
-cognito login (USER_PASSWORD_AUTH, no browser)
-symbol NSE:FUTURE:NIFTY-I intervals 2m, 3m, 5m session 09:15–15:40 IST
-ws wss://origin.ws.prodb.blr1.gocharting.com/blr1/ws
-outputs { csv: '.../maxvol.csv', sheet: false }
-cognito ok expiresIn= 28800 s
-
---- sample 1 @ 2026-08-17T05:25:00.000Z ---
-session dates (IST): 2026-08-17, ...
-  2m: closed=22/23 forming=2026-08-17T10:54:00+05:30
-    last closed 2026-08-17T10:52:00+05:30  OHLC=...  MaxVolB=... MaxVolS=... match=true
-  3m: closed=...
-  5m: closed=...
-  wrote 60 new closed-candle row(s)
-DONE samples= 1 ...
+INFO go-charting-scraper { once: true, sheet: '…' }
+INFO config applied { email: '…', passwordSet: true, instruments: [ 'NSE:FUTURE:NIFTY-I', … ] }
+INFO start monitoring NSE:FUTURE:NIFTY-I
+INFO connecting websocket not open
+INFO sample 1 NSE:FUTURE:NIFTY-I/backfill, …
+INFO   NSE:FUTURE:NIFTY-I 2m: closed=193/193
+INFO   NSE:FUTURE:NIFTY-I 3m: closed=129/129
+INFO   NSE:FUTURE:NIFTY-I 5m: closed=77/77
+INFO wrote 399 new closed-candle row(s)
+INFO shutting down
 ```
+
+A second `ONCE=1 npm start` should print `wrote 0 new closed-candle row(s)`
+(duplicates are skipped). Email, password, and JWTs are redacted in logs.
 
 Checklist:
 
 | Check | Meaning |
 | --- | --- |
-| `cognito ok` | `InitiateAuth` returned an id token |
-| `closed=` > 0 during/after the session | Closed bars decoded and eligible to write |
-| `match=true` on last closed | Server max equals recomputed per-level max |
-| `wrote N new closed-candle row(s)` | Rows appended to CSV and/or Sheets |
+| `config applied` with `passwordSet: true` | `config` tab parsed |
+| `start monitoring …` | Tabs `{symbol} 2m/3m/5m` ensured |
+| `closed=` > 0 during/after the session | Closed bars decoded |
+| `wrote N new closed-candle row(s)` | Rows appended to the spreadsheet |
+| Second run writes `0` | Dedup by tab + `candle_time` |
 
-Also written:
+Then leave it running:
 
-- CSV (if `WRITE_CSV=1`): `investigation/evidence/maxvol.csv` unless `CSV_PATH` is set
-- Google Sheet tabs `{SYMBOL} {interval}` such as `NIFTY-I 5m` (if `GOOGLE_SHEET_ID` is set)
-- Debug JSONL: `investigation/out/poc/debug.jsonl` (tokens redacted)
+```bash
+npm start
+```
 
-If Cognito fails, see [§18](#18-troubleshooting).
+If Cognito or Sheets fails, see [§17](#17-troubleshooting).
 
 ---
 
-## 10. Environment variables
+## 9. Environment variables
 
-GoCharting credentials plus **one output sink** are required. Everything else
-is optional. Copy [`.env.example`](.env.example).
+Copy [`.env.example`](.env.example). Only Google credentials plus the
+spreadsheet id are required.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GOCHARTING_EMAIL` | *(required)* | Login email |
-| `GOCHARTING_PASSWORD` | *(required)* | Login password |
-| `GOCHARTING_EXCHANGE` | `NSE` | Footprint exchange |
-| `GOCHARTING_SEGMENT` | `FUTURE` | Footprint segment |
-| `GOCHARTING_SYMBOL` | `NIFTY-I` | Current-month Nifty futures continuous contract |
-| `INTERVALS` | `2m,3m,5m` | Comma-separated GoCharting interval strings |
-| `MARKET_OPEN` / `MARKET_CLOSE` | `09:15` / `15:40` | IST session used to keep / close bars |
-| `CLOSE_GRACE_MS` | `2000` | Wait after a bar’s end before treating it as closed |
-| `RUN_MS` | *(unset = until close)* | Sampling window in ms. `0` = one shot. Omit to poll until 15:40 IST. |
-| `SAMPLE_MS` | `15000` | Delay between samples |
-| `TOKEN_REFRESH_MS` | `2700000` (45 min) | Refresh Cognito JWT and reconnect the WebSocket |
-| `LAST_N` | `0` (off) | If `> 0`, print the last N candles per interval to stdout |
-| `WRITE_CSV` | unset / false | `1` / `true` / `yes` → append closed bars to a local CSV |
-| `CSV_PATH` | `investigation/evidence/maxvol.csv` | CSV destination (created if missing; **appended**, not overwritten) |
-| `GOOGLE_SHEET_ID` | unset | Spreadsheet id **or** full Google Sheets URL |
+| `GOOGLE_SHEET_ID` | *(required)* | Spreadsheet id **or** full Google Sheets URL |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | unset | Path to the service-account JSON key, or the JSON itself |
-| `GOOGLE_CLIENT_EMAIL` / `GOOGLE_PRIVATE_KEY` | unset | Alternative to the JSON file |
-| `OUT_DIR` | `investigation/out/poc` | `debug.jsonl` |
+| `GOOGLE_CLIENT_EMAIL` / `GOOGLE_PRIVATE_KEY` | unset | Alternative to the JSON file (`\n` in the PEM is unescaped) |
+| `CONFIG_TAB` | `config` | Name of the config worksheet |
+| `CONFIG_POLL_MS` | `5000` | How often to re-read `config` (min 1000) |
+| `SAMPLE_MS` | `15000` | Delay between GoCharting samples while in session |
+| `INTERVALS` | `2m,3m,5m` | GoCharting interval strings |
+| `CLOSE_GRACE_MS` | `2000` | Wait after a bar’s end before treating it as closed |
+| `AFTER_CLOSE_BUFFER_MS` | `60000` | Extra sampling after the session close to catch last bars |
+| `TOKEN_REFRESH_MS` | `2700000` (45 min) | Refresh Cognito JWT / reconnect WebSocket |
+| `GOCHARTING_SESSION` | `RTH` | Session type sent on WS payloads |
 | `WS_DC` | `blr1` | Market-data datacenter (`blr1` or `nyc1`) |
 | `WS_TAG` | `go-charting-scraper` | `tag=` query param on the WebSocket URL |
-
-`HEADLESS`, `PW_CHANNEL`, and `CHART_URL` are unused by the live scraper.
-
-- Omit `RUN_MS` on a weekday → poll until `MARKET_CLOSE` + 1 minute
-- `RUN_MS=0` → **1** sample (backfill every already-closed bar)
-- Weekend / after hours with `RUN_MS` unset → one-shot of the last weekday session
-
-`LAST_N` does not change the output schema; it only adds extra stdout lines.
+| `WS_HOST` | derived from `WS_DC` | Full `wss://…` override |
+| `ONCE` | unset / false | `1` → one sample then exit |
+| `WRITE_CSV` | unset / false | Also append a wide debug CSV |
+| `CSV_PATH` | `logs/maxvol.csv` | CSV destination |
+| `ERROR_LOG_PATH` | `logs/error.log` | Rotating error log |
+| `STATUS_PATH` | `logs/status.json` | Heartbeat (instruments, last sample, WS state) |
 
 ---
 
-## 11. CSV output
+## 10. Candle tabs and columns
 
-CSV is **opt-in**: set `WRITE_CSV=1`. Default path:
-`investigation/evidence/maxvol.csv`.
+Each instrument gets three tabs named from the **symbol only** (no exchange
+or category):
 
-**Rows are appended.** The file is not overwritten. On startup the scraper
-reads existing `interval` + `candle_time` keys and skips duplicates, so it is
-safe to re-run.
-
-### Columns
-
-| Column | Description |
+| Instrument on `config` | Tabs |
 | --- | --- |
-| `sampled_at_utc` | When this closed bar was first persisted (ISO UTC) |
-| `sampled_at_ist` | Same instant, Asia/Kolkata |
-| `sample_n` | 1-based sample index in this process |
-| `interval` | `2m`, `3m`, or `5m` |
-| `symbol` | `NSE:FUTURE:NIFTY-I` (or whatever you configured) |
-| `candle_time` | Footprint candle open time (`FootPrintCandle.date`) |
-| `open` / `high` / `low` / `close` | OHLC of that candle from `TS/V2` `OHLCV/V2` (`protobars.Candle`). Prices are integer ticks, same as `max_vol_*_level`. If the OHLC bar is missing, `high`/`low` fall back to the footprint `ending_summary` (or min/max traded price level). |
-| `ohlc_volume` | Total volume on the OHLC bar (`Candle.volume`). Empty if no matching `TS/V2` bar. |
-| `max_vol_b` | Server **Max Buy Volume** (`max.buy.volume`) |
-| `max_vol_s` | Server **Max Sell Volume** (`max.sell.volume`) |
-| `max_vol_b_level` | Price level where recomputed max buy occurred |
-| `max_vol_s_level` | Price level where recomputed max sell occurred |
-| `totals_buy` / `totals_sell` | Sum of buy/sell volume across all levels in the candle |
-| `price_levels` | Number of footprint price rows |
-| `recomputed_max_b` / `recomputed_max_s` | `max` over per-level volumes |
-| `values_match` | `true` if server max equals recomputed max |
-| `candles_in_response` | How many candles were in the decoded payload(s) |
-| `ok` | `true` if a closed candle was written |
-| `error` | Empty on success |
-| `delta` | Candle delta = buy volume − sell volume (`ending_summary.close_delta`). Not options-Greeks delta. |
-| `max_delta` / `min_delta` | Intra-bar cumulative-delta high / low (`ending_summary.max_delta` / `min_delta`) |
-| `poc` | Point of control: price tick with the largest buy+sell volume |
-| `poc_volume` | Total volume at the POC |
-| `volume` | Footprint candle volume (`totals.overall.volume`, else buy+sell) |
-| `oi` | Open interest at the end of the matching OHLC bar |
-| `oi_change` | `oi` minus the previous OHLC bar’s `oi` (empty on the first bar in the response) |
-| `vwap1` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, reset each IST session date. After-hours bars are excluded. |
-| `vwap2` | Per-bar VWAP from footprint levels: `sum(price × volume) / sum(volume)`. Same as GoCharting bar statistics. Ticks (chart shows `round(ticks/100)` rupees). |
+| `NSE:FUTURE:NIFTY-I` | `NIFTY-I 2m`, `NIFTY-I 3m`, `NIFTY-I 5m` |
+| `MCX:FUTURE:CRUDEOIL-I` | `CRUDEOIL-I 2m`, … |
+| `NSE:OPTIONS:NIFTY2681824300CE` | `NIFTY2681824300CE 2m`, … |
 
-Price `level` values are **integer ticks** as sent by the feed.
+The `config` tab is never renamed. Missing data tabs are created on first
+monitor. Existing `candle_time` values are not duplicated.
 
-An older crude-oil POC run is committed at
-[`investigation/evidence/maxvol-poc.csv`](investigation/evidence/maxvol-poc.csv).
+Sheet schema (10 columns) is listed in [§1](#1-what-you-get). Optional CSV
+(`WRITE_CSV=1`) keeps a wider debug schema including OHLC and recompute
+columns.
+
+Prices and POC are **integer ticks** as sent by the feed. Chart UI often
+shows `round(ticks/100)` rupees for `vwap2`.
 
 ---
 
-## 12. Google Sheets
+## 11. Market hours and 24×7 behaviour
 
-When `GOOGLE_SHEET_ID` is set, each closed candle is appended to a tab named
-`{SYMBOL} {interval}` using the contract id only (no exchange or segment).
-Examples: `NIFTY-I 5m`, `NIFTY2681824300CE 5m`. Existing `candle_time` values
-on that tab are not duplicated. Older tabs named only `2m` / `3m` / `5m` are
-left in place and unused.
+Times are **Asia/Kolkata**. Only bars that **open** inside the exchange
+window are persisted. Last bars shorter than the interval are closed at the
+session close + `CLOSE_GRACE_MS`.
 
-Sheets use a slim schema (CSV keeps the wider debug columns):
+| Exchange | Open | Close |
+| --- | --- | --- |
+| NSE, BSE | 09:15 | 15:40 |
+| MCX (energy / bullion / metals, e.g. CRUDEOIL) | 09:00 | 23:30, or **23:55** while US Eastern is on daylight saving |
 
-| Column | Description |
-| --- | --- |
-| `candle_time` | Candle open time in IST, without a `+05:30` suffix |
-| `delta` | Buy volume − sell volume |
-| `max_delta` | Intra-bar cumulative-delta high |
-| `max_vol_b` / `max_vol_s` | Server max buy / sell volume at a single price |
-| `poc` | Point of control (price tick with most buy+sell volume) |
-| `volume` | Footprint candle volume |
-| `oi_change` | Change in open interest vs the previous OHLC bar |
-| `vwap1` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
-| `vwap2` | Per-bar footprint VWAP in ticks (chart bar stats show `round(ticks/100)`) |
+MCX agri products close earlier; the default matches CRUDEOIL/GOLD-style
+contracts.
 
-### One-time Google Cloud setup
+NSE last bars: **5m 15:35**, **3m 15:39**, **2m 15:39**. A 2-minute last bar
+may be shorter than 2 minutes (NSE session is 385 minutes).
 
-1. Create a Google Cloud project (or reuse one).
-2. Enable the **Google Sheets API**.
-3. Create a **service account**, download its JSON key, and store it outside
-   git (for example `google-service-account.json` next to `.env`, which is
-   gitignored).
-4. Create a spreadsheet (or use one you already have). Copy the id from the
-   URL: `https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit`.
-5. Share that spreadsheet with the service account’s `client_email` as
-   **Editor**.
-6. In `.env`:
+The process does **not** exit at 15:40 or on weekends:
 
-```bash
-GOOGLE_SHEET_ID=your-spreadsheet-id-or-full-url
-GOOGLE_SERVICE_ACCOUNT_JSON=./google-service-account.json
-```
+- During session: sample ~every 15s; keep the WebSocket open.
+- Shortly after close: one more sample to catch the last bars, then backfill
+  is marked done.
+- Overnight / weekend: close the WebSocket, keep polling `config` every 5s,
+  reconnect at the next weekday open.
+- Process start after hours: backfill the last weekday session once, then idle.
 
-You can set **both** `GOOGLE_SHEET_ID` and `WRITE_CSV=1`; each sink tracks its
-own duplicates independently.
+Empty `closed=0` on a holiday is expected.
 
 ---
 
-## 13. Common recipes
+## 12. Changing instruments
 
-All commands assume you are in `investigation/` and `.env` is filled in.
+Edit `Instrument1` / `Instrument2` / `Instrument3` on the `config` tab. Within
+about 5 seconds the process:
 
-### One-shot backfill of closed candles (cron-friendly)
+1. Stops requesting the old symbol (X).
+2. Creates `{Y} 2m`, `{Y} 3m`, `{Y} 5m` if they do not exist.
+3. Backfills Y for the current (or last weekday) session.
+4. Starts live monitoring of Y.
 
-```bash
-RUN_MS=0 WRITE_CSV=1 node poc-log-maxvol.js
-```
+**X’s tabs are not deleted.** Historical rows stay.
 
-### Last 5 candles to stdout (including the forming bar)
-
-```bash
-RUN_MS=0 WRITE_CSV=1 LAST_N=5 node poc-log-maxvol.js
-```
-
-CSV/Sheets still store **closed** bars only.
-
-### Live session (poll until 15:40 IST)
-
-```bash
-WRITE_CSV=1 node poc-log-maxvol.js
-```
-
-### Google Sheets only
-
-```bash
-RUN_MS=0 node poc-log-maxvol.js
-# requires GOOGLE_SHEET_ID + service-account JSON in .env
-```
+If the email/password cells change, the new login is attempted first. A bad
+password is logged and the previous Cognito session is kept.
 
 ---
 
-## 14. Linux server / unattended deploy
+## 13. Linux server (systemd)
 
-### 14.1 Dedicated user and directories
+Recommended: one long-running process with `Restart=always`. Do not use the
+old oneshot timer / cron recipes that ran `investigation/poc-log-maxvol.js`.
+
+### 13.1 User, clone, dependencies
 
 ```bash
 sudo useradd --system --home /var/lib/gocharting --shell /usr/sbin/nologin gocharting || true
-sudo mkdir -p /opt/go-charting-scraper /var/lib/gocharting/out
-sudo chown -R gocharting:gocharting /var/lib/gocharting
-
+sudo mkdir -p /opt/go-charting-scraper
 sudo git clone https://github.com/anurag-roy/go-charting-scraper.git /opt/go-charting-scraper
-cd /opt/go-charting-scraper/investigation
-sudo -H -u gocharting bash -lc 'cd /opt/go-charting-scraper/investigation && npm ci'
+cd /opt/go-charting-scraper
+sudo npm ci
 sudo chown -R gocharting:gocharting /opt/go-charting-scraper
 ```
 
-### 14.2 systemd — one-shot on a timer (recommended)
+Create `/etc/gocharting/env` as in [§7](#7-configure-the-vps--laptop-env).
 
-`/etc/systemd/system/gocharting-maxvol.service`:
+### 13.2 Install the unit
+
+The repo ships [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service):
 
 ```ini
 [Unit]
-Description=GoCharting Max Vol one-shot scrape
+Description=GoCharting Google Sheets scraper (24x7)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
 User=gocharting
 Group=gocharting
-WorkingDirectory=/opt/go-charting-scraper/investigation
+WorkingDirectory=/opt/go-charting-scraper
 EnvironmentFile=/etc/gocharting/env
-Environment=RUN_MS=0
-ExecStart=/usr/bin/node poc-log-maxvol.js
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=10
 Nice=10
-```
-
-`/etc/systemd/system/gocharting-maxvol.timer`:
-
-```ini
-[Unit]
-Description=Run GoCharting Max Vol scrape every 5 minutes
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=5min
-AccuracySec=15s
-Persistent=true
+NoNewPrivileges=true
 
 [Install]
-WantedBy=timers.target
+WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now gocharting-maxvol.timer
-sudo systemctl list-timers | grep gocharting
-sudo journalctl -u gocharting-maxvol.service -e
-```
-
-With `WRITE_CSV=1` and `CSV_PATH=/var/lib/gocharting/maxvol.csv` each shot
-**appends** newly closed candles and skips rows already in the file.
-
-### 14.3 systemd — 24×7 service (recommended)
-
-Install [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service).
-The process stays up overnight and on weekends; it closes the GoCharting
-websocket when every configured exchange is out of session and reconnects at
-the next open. Use `Restart=always`.
-
-`/etc/gocharting/env` only needs Google credentials (GoCharting email/password
-come from the `config` tab):
-
-```bash
-GOOGLE_SHEET_ID=your-spreadsheet-id
-GOOGLE_CLIENT_EMAIL=...
-GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-```
-
-```bash
-sudo cp deploy/gocharting-scraper.service /etc/systemd/system/
+sudo cp /opt/go-charting-scraper/deploy/gocharting-scraper.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now gocharting-scraper.service
 sudo journalctl -u gocharting-scraper.service -f
 ```
 
-Errors are also appended to `logs/error.log` in the repo checkout.
+Smoke-test as the service user before enabling, if you want:
 
-### 14.4 cron alternative
-
-`/etc/cron.d/gocharting`:
-
-```cron
-*/5 * * * * gocharting bash -lc 'set -a; source /etc/gocharting/env; set +a; cd /opt/go-charting-scraper/investigation && /usr/bin/node poc-log-maxvol.js >> /var/lib/gocharting/run.log 2>&1'
+```bash
+sudo -u gocharting bash -lc 'set -a; source /etc/gocharting/env; set +a; cd /opt/go-charting-scraper && ONCE=1 /usr/bin/node src/index.js'
 ```
 
-Ensure `/etc/gocharting/env` contains `RUN_MS=0` and `WRITE_CSV=1` (or sheet id).
+### 13.3 Updates
+
+```bash
+cd /opt/go-charting-scraper
+sudo -u gocharting git pull --ff-only
+sudo npm ci
+sudo systemctl restart gocharting-scraper.service
+```
 
 ---
 
-## 15. Docker
+## 14. Docker
 
-A plain Node image is enough (no Playwright/Chromium):
-
-```dockerfile
-FROM node:22-bookworm-slim
-
-WORKDIR /app
-COPY investigation/package.json investigation/package-lock.json ./
-RUN npm ci --omit=dev
-COPY investigation/ ./
-
-ENV RUN_MS=0
-ENV WRITE_CSV=1
-# credentials at runtime, not in the image:
-#   -e GOCHARTING_EMAIL -e GOCHARTING_PASSWORD
-#   -e GOOGLE_SHEET_ID -e GOOGLE_SERVICE_ACCOUNT_JSON
-
-CMD ["node", "poc-log-maxvol.js"]
-```
-
-Build and run:
+A root [`Dockerfile`](Dockerfile) is included (plain Node 22, no Playwright):
 
 ```bash
 docker build -t gocharting-scraper .
 docker run --rm \
-  -e GOCHARTING_EMAIL \
-  -e GOCHARTING_PASSWORD \
-  -e RUN_MS=0 \
-  -e WRITE_CSV=1 \
-  -e CSV_PATH=/data/maxvol.csv \
-  -v /var/lib/gocharting:/data \
+  -e GOOGLE_SHEET_ID \
+  -e GOOGLE_CLIENT_EMAIL \
+  -e GOOGLE_PRIVATE_KEY \
+  -e ONCE=1 \
   gocharting-scraper
 ```
 
-Do not bake passwords into the image.
+For 24×7, omit `ONCE=1` and use `--restart unless-stopped`. Prefer mounting a
+JSON key over putting a PEM in `-e`:
+
+```bash
+docker run -d --name gocharting-scraper --restart unless-stopped \
+  -e GOOGLE_SHEET_ID=your-spreadsheet-id \
+  -e GOOGLE_SERVICE_ACCOUNT_JSON=/secrets/google-service-account.json \
+  -v /etc/gocharting/google-service-account.json:/secrets/google-service-account.json:ro \
+  gocharting-scraper
+```
+
+Do not bake keys or the sheet password into the image. The sheet password
+still lives on the `config` tab.
+
+---
+
+## 15. Logs
+
+Written under `logs/` in the working directory (gitignored except
+[`logs/README.md`](logs/README.md)):
+
+| File | Purpose |
+| --- | --- |
+| `logs/error.log` | Errors only. Credentials and JWTs redacted. Rotates at 5 MB (keeps 3 backups). |
+| `logs/status.json` | Last config summary (no password), last sample time, websocket `open`/`closed`. |
+| stdout / `journalctl` | Routine `INFO` / `WARN` lines. |
+
+The `gocharting` user must be able to write `logs/` (the `chown` in §13.1
+covers that).
 
 ---
 
 ## 16. What the scraper does *not* do
 
-By design, matching the original investigation constraints:
-
-- It does **not** open a browser or drive the terminal UI.
-- It does **not** change GoCharting profile or chart settings.
-- It does **not** click timeframe / layout / indicator buttons.
-- 2m / 3m / 5m are requested as `FOOTPRINT/V2` and `TS/V2` `OHLCV/V2`
-  WebSocket commands.
-- It does **not** persist cookies between process starts (each run
-  authenticates with Cognito again).
-- It does **not** write the currently forming candle; only closed bars.
-- It does **not** subscribe to the live `trade` tape for incremental
-  updates; it re-fetches footprint snapshots. That is enough for 15s
-  polling.
+- It does **not** open a browser or drive the GoCharting UI.
+- It does **not** change profile, chart, or indicator settings.
+- 2m / 3m / 5m are requested as `FOOTPRINT/V2` and `TS/V2` `OHLCV/V2`.
+- It does **not** write the forming candle; only closed bars.
+- It does **not** subscribe to the live `trade` tape; it re-fetches footprint
+  snapshots. That is enough for 15s polling of 2m/3m/5m bars.
+- It does **not** delete old symbol tabs when you change an instrument.
+- It does **not** take GoCharting credentials from `.env`.
 
 ---
 
-## 17. Target (symbol / intervals)
-
-Defaults live in `.env` / [`.env.example`](.env.example), not hardcoded
-constants:
-
-```bash
-GOCHARTING_EXCHANGE=NSE
-GOCHARTING_SEGMENT=FUTURE
-GOCHARTING_SYMBOL=NIFTY-I
-INTERVALS=2m,3m,5m
-GOCHARTING_SESSION=RTH
-```
-
-Notes:
-
-- Login is Cognito HTTPS only. `CHART_URL` is unused by the live scraper
-  (optional for Playwright capture scripts).
-- Interval strings must be what the API expects (`2m`, `3m`, `5m`).
-- `NIFTY-I` is the current-month Nifty futures continuous contract. For the
-  cash index, try `GOCHARTING_SEGMENT=INDEX` and `GOCHARTING_SYMBOL=NIFTY`
-  (confirm the exact instrument string in the GoCharting UI).
-- `SESSION` is `RTH` as sent by the official client.
-- Session calendar dates are computed in **Asia/Kolkata**. Only bars that
-  open inside `MARKET_OPEN`–`MARKET_CLOSE` are persisted.
-
----
-
-## 18. Troubleshooting
+## 17. Troubleshooting
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
-| `missing GOCHARTING_EMAIL / GOCHARTING_PASSWORD` | Env not exported / `.env` missing | Copy `.env.example`. systemd: `EnvironmentFile=` path and `chmod 600`. |
-| `set GOOGLE_SHEET_ID ... and/or WRITE_CSV=1` | No output sink | Set `WRITE_CSV=1` and/or `GOOGLE_SHEET_ID`. |
-| Google credentials missing / file not found | JSON key path wrong | Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the service-account file and share the sheet with its `client_email`. |
-| `cognito auth failed` / `NotAuthorizedException` | Bad email/password | Confirm credentials. Cognito does not open a login UI. |
-| `cognito extra challenge` | MFA / extra Cognito step | This client only supports `USER_PASSWORD_AUTH` with no challenge. |
-| `ws unexpected HTTP 401` / `poc ws connect timeout` | JWT rejected or WSS blocked | Confirm egress to `origin.ws.prodb.blr1.gocharting.com`. Check `OUT_DIR/debug.jsonl` for `poc-ws-open` / `poc-ws-unexpected`. |
-| `cognito ok` but `closed=0` / `no candles` | Weekend/holiday, wrong symbol, or before first bar | Check `OUT_DIR/debug.jsonl` for `poc-ws-open`, `footprint`, `decode-err`. Confirm `NSE:FUTURE:NIFTY-I` is the instrument string your account sees. |
-| No new rows near 15:40 IST | Last bars not closed yet | Wait until 15:40 + `CLOSE_GRACE_MS`, or run `RUN_MS=0` after the close. |
-| `values_match=false` | Decoder/schema drift | Re-fetch `footprint.proto` from `https://gocharting.com/assets/proto/1.1/footprint.proto` into `evidence/`. Open an issue with a redacted debug line. |
-| Empty `open` / `close` | `TS/V2` OHLC bar not matched | Check `OUT_DIR/debug.jsonl` for `ohlc`, `ohlc-miss`, `ohlc-decode-err`. Re-fetch `ohlc_bars.proto`. `high`/`low` may still come from the footprint `ending_summary`. |
-| CSV missing / empty | `WRITE_CSV` unset, wrong cwd, or path not writable | Set `WRITE_CSV=1`. Run from `investigation/`, or set an absolute `CSV_PATH`. |
-| Process killed (137) | OOM | Unusual for this scraper (~128–256 MB). Check the host, not Chromium. |
-| Works on SSH but not systemd | Different user / no env | See [§14.1](#141-dedicated-user-and-directories). `journalctl -u gocharting-maxvol.service`. |
+| `set GOOGLE_SHEET_ID …` (exit 2) | Env not loaded | Copy `.env.example`. systemd: `EnvironmentFile=` exists and `chmod 600`. |
+| `Google credentials are missing` / file not found | JSON path or PEM wrong | Set `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY`. Share the sheet with the service account as Editor. |
+| `config sheet is missing email, password, or instruments` | Tab name / cells | Tab must be `config`. Labels in A, values in B. |
+| `unsupported exchange` / `invalid instrument` | Bad `InstrumentN` | Use `NSE\|BSE\|MCX:CATEGORY:SYMBOL`. Check `logs/error.log`. |
+| `cognito auth failed` / `NotAuthorizedException` | Bad sheet password | Confirm the `config` email/password. Cognito does not open a login UI. |
+| `cognito extra challenge` | MFA | Only `USER_PASSWORD_AUTH` with no challenge is supported. |
+| `ws unexpected HTTP 401` / connect timeout | JWT rejected or WSS blocked | Egress to `origin.ws.prodb.blr1.gocharting.com`. Watch journal for `connecting websocket`. |
+| `closed=0` / `no candles` | Holiday, wrong symbol, or before first bar | Confirm the instrument string in the GoCharting UI. After hours, a backfill of the last weekday is expected. |
+| No new NSE rows after 15:40 | Last bars already flushed | Wait until 15:40 + `CLOSE_GRACE_MS`. MCX may still be live. |
+| Duplicate worry on restart | — | Keys are reloaded from each tab; a second `ONCE=1` should write 0. |
+| New instrument, no new tabs | Service account cannot write | Re-share the spreadsheet as Editor. `journalctl` / `logs/error.log`. |
+| Process killed (137) | OOM | Unusual (~128–256 MB). Check the host. |
+| Works on SSH but not systemd | Different user / no env | See [§13](#13-linux-server-systemd). `journalctl -u gocharting-scraper.service`. |
 
-Enable a one-off verbose look without extra flags: `OUT_DIR` +
-`debug.jsonl` are enough. Never paste `debug.jsonl` in public tickets
-without checking — redaction is best-effort.
+Never paste `logs/error.log` or `status.json` in public tickets without
+checking — redaction is best-effort and the status file includes the
+GoCharting email.
 
 ### Quick self-test
 
 ```bash
-RUN_MS=0 WRITE_CSV=1 node poc-log-maxvol.js
+ONCE=1 npm start
 ```
 
 ---
 
-## 19. Investigation / debug scripts
+## 18. Security
 
-You do **not** need these to scrape. They were used to reverse-engineer
-the protocol (`FINDINGS.md`).
+- Treat the `config` tab password and the JWT as secrets. Restrict spreadsheet
+  sharing. Rotate the GoCharting password if it ever landed in a screenshot,
+  ticket, or log.
+- Do not commit `/etc/gocharting/env`, `.env`, `google-service-account.json`,
+  `logs/error.log`, or `logs/status.json`.
+- This automation uses **your** GoCharting account against their Cognito pool
+  and WebSocket. Confirm their terms of use allow it. Typical breakage is
+  Cognito client-id drift or WS command schema changes.
+- Be polite with polling. 5s config reads and 15s `FOOTPRINT/V2` snapshots are
+  enough for closed 2m/3m/5m bars.
+
+---
+
+## 19. Investigation scripts (optional)
+
+You do **not** need these to scrape. They reverse-engineered the protocol
+([`investigation/FINDINGS.md`](investigation/FINDINGS.md)).
+
+The older single-symbol PoC is `investigation/poc-log-maxvol.js` (its own
+`package.json`, still wants `GOCHARTING_EMAIL` in env). Do not deploy that
+on the VPS.
 
 | Script | Role |
 | --- | --- |
-| `poc-log-maxvol.js` | **Production scraper** (this guide) |
-| `investigate.js` | Login + dump HTTP / WS / console (bodies under `out/`) |
-| `capture-frames.js` | Save full binary WS frames |
-| `decode-frames.js` | Decode saved frames with `footprint.proto` |
-| `recon.js` / `recon-login.js` | Page-structure probes |
-| `analyze-ws.js` / `extract.js` | Offline helpers |
+| `src/index.js` | **Production scraper** (this guide) |
+| `investigation/poc-log-maxvol.js` | Legacy one-symbol PoC |
+| `investigation/investigate.js` | Login + dump HTTP / WS / console |
+| `investigation/capture-frames.js` | Save binary WS frames |
+| `investigation/decode-frames.js` | Decode saved frames with `footprint.proto` |
 
-`investigation/out/` is gitignored because captures can contain JWTs and
-cookies even after redaction attempts. Never commit it.
-
-To re-run a protocol capture:
+`investigation/out/` is gitignored (captures can contain JWTs). Never commit
+it. Playwright Chromium is only for those capture scripts:
 
 ```bash
 cd investigation
-export GOCHARTING_EMAIL=... GOCHARTING_PASSWORD=...
-HEADLESS=1 node investigate.js          # or PW_CHANNEL=chrome xvfb-run -a
+npm ci
+npx playwright install --with-deps chromium
 ```
 
 ---
 
-## 20. Security, git, and ToS
-
-- Treat `GOCHARTING_PASSWORD` and the JWT as secrets. Rotate the password
-  if it ever landed in a log, screenshot, or ticket.
-- Do not commit `/etc/gocharting/env`, `.env`, `google-service-account.json`,
-  `investigation/out/`, or raw `debug.jsonl` from a failed redaction.
-- CSV files contain **volumes and prices only** and are safe to keep.
-- This automation uses **your** account against GoCharting’s Cognito pool
-  and WebSocket. Confirm their terms of use allow it. The usual breakage
-  mode is Cognito client-id / metadata drift or WS command schema changes.
-- Be polite with polling. The official UI already streams this data;
-  15s `FOOTPRINT/V2` snapshots are enough for closed 2m/3m/5m bars.
-
----
-
-## Minimal copy-paste (Ubuntu, first time)
+## Minimal copy-paste (Ubuntu VPS)
 
 ```bash
 sudo apt-get update
@@ -822,17 +624,16 @@ sudo apt-get install -y nodejs
 
 git clone https://github.com/anurag-roy/go-charting-scraper.git
 cd go-charting-scraper
-cp .env.example .env
-# edit .env: GOCHARTING_EMAIL, GOCHARTING_PASSWORD, WRITE_CSV=1
-# and/or GOOGLE_SHEET_ID + GOOGLE_SERVICE_ACCOUNT_JSON
-
-cd investigation
 npm ci
+cp .env.example .env
+# edit .env: GOOGLE_SHEET_ID + GOOGLE_SERVICE_ACCOUNT_JSON
+# (or GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY)
+# Share the spreadsheet with the service account as Editor.
+# Fill the config tab: email, password, Instrument1..3.
 
-RUN_MS=0 LAST_N=5 node poc-log-maxvol.js
+ONCE=1 npm start
 ```
 
-When that prints `cognito ok` and `wrote N new closed-candle row(s)` for
-`2m` / `3m` / `5m`, scraping is working. Add Google Sheets credentials
-when you want the spreadsheet sink, then add the systemd timer in
-[§14](#14-linux-server--unattended-deploy).
+When that prints `config applied` and `wrote N new closed-candle row(s)`,
+scraping is working. Then `npm start` or install the systemd unit in
+[§13](#13-linux-server-systemd).
