@@ -72,7 +72,8 @@ Errors go to [`logs/error.log`](logs/README.md) (redacted) and stdout.
 [`logs/status.json`](logs/README.md) is a small heartbeat for the VPS.
 
 A systemd unit is in [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service).
-Full VPS notes, including the older PoC scraper, are in [`INSTRUCTIONS.md`](INSTRUCTIONS.md).
+Clone, Google Sheet setup, first run, and VPS/systemd/Docker deploy are in
+[`INSTRUCTIONS.md`](INSTRUCTIONS.md).
 
 ## Protocol notes
 
