@@ -1,5 +1,6 @@
 /** Slim schema written to Google Sheets. */
 export const SHEET_COLUMNS = [
+  'symbol',
   'candle_time',
   'open',
   'high',
@@ -14,6 +15,10 @@ export const SHEET_COLUMNS = [
   'oi_change',
   'vwap',
 ];
+
+/** GoCharting stores prices as integer ticks; sheet OHLC/VWAP are ticks / 100. */
+export const SHEET_PRICE_SCALE = 100;
+const SHEET_PRICE_COLUMNS = new Set(['open', 'high', 'low', 'close', 'vwap']);
 
 const VWAP_HEADER_ALIASES = ['vwap', 'vwap1', 'vwap2'];
 
@@ -149,9 +154,57 @@ export function rowToValues(row) {
   });
 }
 
+/** Contract code only (`NIFTY26AUG24050CE`), not `NSE:OPTIONS:…`. */
+export function sheetDisplaySymbol(rowOrId) {
+  if (rowOrId && typeof rowOrId === 'object') {
+    const contract = String(rowOrId.contract || '').trim();
+    if (contract) return contract;
+    return sheetDisplaySymbol(rowOrId.symbol);
+  }
+  const id = String(rowOrId || '').trim();
+  const parts = id.split(':').map((p) => p.trim()).filter(Boolean);
+  return parts.length >= 3 ? parts.slice(2).join(':') : id;
+}
+
+export function sheetDisplaySymbolFromIdentity(identity) {
+  const parts = String(identity || '').split('|');
+  return sheetDisplaySymbol(parts[2] || '');
+}
+
+export function scaleSheetPrice(v, { decimals = 2 } = {}) {
+  if (!isFilledOhlcValue(v)) return '';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '';
+  return Number((n / SHEET_PRICE_SCALE).toFixed(decimals));
+}
+
+export function sheetMaxDelta(v) {
+  if (!isFilledOhlcValue(v)) return 0;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return n;
+}
+
+export function isLegacyUnprefixedSheetHeader(header, columns = SHEET_COLUMNS) {
+  const data = Array.isArray(header) ? headerWithoutIdentity(header) : [];
+  if (!data.length || columns[0] !== 'symbol' || data[0] === 'symbol') return false;
+  const rest = columns.slice(1);
+  return headersMatch(data, rest)
+    || isPrefixHeader(data, rest)
+    || isLegacyVwapHeader(data, rest);
+}
+
+export function sheetCandleTimeFromValues(values, columns = SHEET_COLUMNS) {
+  const i = columns.indexOf('candle_time');
+  return formatSheetCandleTime(i >= 0 ? values?.[i] : '');
+}
+
 export function rowToSheetValues(row) {
   return SHEET_COLUMNS.map((c) => {
+    if (c === 'symbol') return sheetDisplaySymbol(row);
     if (c === 'candle_time') return formatSheetCandleTime(row.candle_time);
+    if (SHEET_PRICE_COLUMNS.has(c)) return scaleSheetPrice(row[c]);
+    if (c === 'max_delta') return sheetMaxDelta(row.max_delta);
     const v = row[c];
     return v == null ? '' : v;
   });
@@ -171,8 +224,8 @@ export function sheetRowMissingOhlc(header, values) {
   const cols = Array.isArray(header) && header.length ? header : SHEET_COLUMNS;
   const iOpen = cols.indexOf('open');
   const iClose = cols.indexOf('close');
-  const open = iOpen >= 0 ? values?.[iOpen] : values?.[1];
-  const close = iClose >= 0 ? values?.[iClose] : values?.[4];
+  const open = iOpen >= 0 ? values?.[iOpen] : values?.[cols.indexOf('open')];
+  const close = iClose >= 0 ? values?.[iClose] : values?.[cols.indexOf('close')];
   return !isFilledOhlcValue(open) || !isFilledOhlcValue(close);
 }
 
@@ -286,7 +339,9 @@ export function shouldRewriteHeader(header, columns) {
   const data = headerWithoutIdentity(header);
   if (!Array.isArray(data) || !data.length) return true;
   if (headersMatch(data, columns)) return false;
-  return isPrefixHeader(data, columns) || isLegacyVwapHeader(data, columns);
+  return isPrefixHeader(data, columns)
+    || isLegacyVwapHeader(data, columns)
+    || isLegacyUnprefixedSheetHeader(data, columns);
 }
 
 /** IST calendar date (`YYYY-MM-DD`) from a sheet `candle_time` value. */
@@ -297,15 +352,27 @@ export function sheetCandleDate(iso) {
 /**
  * Project a stored sheet row onto the current column list.
  * `vwap1` is copied into `vwap` when the live header is the old split schema.
+ * Pre-symbol tabs (OHLC in integer ticks) are scaled for display.
  */
-export function mapSheetRow(header, row, columns = SHEET_COLUMNS) {
+export function mapSheetRow(header, row, columns = SHEET_COLUMNS, { symbol } = {}) {
+  const dataHeader = headerWithoutIdentity(header);
   const get = (name) => {
     const i = (header || []).indexOf(name);
     return i >= 0 ? (row?.[i] ?? '') : '';
   };
+  const legacyPrices = isLegacyUnprefixedSheetHeader(dataHeader, columns);
   return columns.map((col) => {
+    if (col === 'symbol') return symbol || get('symbol') || '';
     if (col === 'candle_time') return formatSheetCandleTime(get('candle_time'));
-    if (col === 'vwap') return get('vwap') || get('vwap1') || '';
+    if (col === 'vwap') {
+      const raw = get('vwap') || get('vwap1') || '';
+      return legacyPrices ? scaleSheetPrice(raw) : raw;
+    }
+    if (SHEET_PRICE_COLUMNS.has(col)) {
+      const raw = get(col);
+      return legacyPrices ? scaleSheetPrice(raw) : raw;
+    }
+    if (col === 'max_delta') return sheetMaxDelta(get('max_delta'));
     return get(col);
   });
 }

@@ -11,6 +11,9 @@ import {
   rowHasOhlc,
   selectSheetWrites,
   sheetCandleDate,
+  sheetCandleTimeFromValues,
+  sheetDisplaySymbol,
+  sheetDisplaySymbolFromIdentity,
   sheetRowNeedsPatch,
   sheetRowKey,
   sheetTabName,
@@ -126,14 +129,12 @@ export class SheetsSink {
       const res = await withRetry(
         () => this.sheetsApi.spreadsheets.values.get({
           spreadsheetId: this.spreadsheetId,
-          range: sheetA1(tab, 'A1:M1'),
+          range: sheetA1(tab, 'A1:Z1'),
         }),
         retryOpts(this.log, `header ${tab}`),
       );
       const header = res.data.values?.[0] || [];
-      if (!header.length || shouldRewriteHeader(header, SHEET_COLUMNS)) {
-        await this.#writeHeader(tab);
-      }
+      if (!header.length) await this.#writeHeader(tab);
     }
     this.staticTabsReady = true;
   }
@@ -154,7 +155,7 @@ export class SheetsSink {
 
   /**
    * Keep only rows whose `candle_time` date is `dateStr` (`YYYY-MM-DD`).
-   * Also rewrites a legacy `vwap1`/`vwap2` header to `vwap`.
+   * Also rewrites a legacy header (no `symbol` column, split `vwap1`/`vwap2`).
    * Returns how many data rows were removed.
    */
   async retainSession(instrument, dateStr) {
@@ -163,7 +164,7 @@ export class SheetsSink {
     await this.#ensureTabs(tabs);
     let dropped = 0;
     for (const tab of tabs) {
-      dropped += await this.#retainTabDate(tab, dateStr);
+      dropped += await this.#retainTabDate(tab, dateStr, instrument);
       this.loadedTabs.add(tab);
     }
     return dropped;
@@ -249,6 +250,44 @@ export class SheetsSink {
     }
   }
 
+  #replaceMappedTabKeys(tab, mapped) {
+    const times = (mapped || []).map((row) => sheetCandleTimeFromValues(row)).filter(Boolean);
+    this.#replaceTabKeys(
+      tab,
+      times,
+      (mapped || [])
+        .filter((row) => sheetRowNeedsPatch(SHEET_COLUMNS, row))
+        .map((row) => sheetCandleTimeFromValues(row))
+        .filter(Boolean),
+    );
+  }
+
+  #mapTabRows(header, rows, symbol) {
+    return (rows || [])
+      .map((row) => mapSheetRow(header, row, SHEET_COLUMNS, { symbol }))
+      .filter((row) => sheetCandleTimeFromValues(row));
+  }
+
+  async #writeMappedData(tab, mapped) {
+    await withRetry(
+      () => this.sheetsApi.spreadsheets.values.clear({
+        spreadsheetId: this.spreadsheetId,
+        range: sheetA1(tab, 'A2:Z'),
+      }),
+      retryOpts(this.log, `clear ${tab}`),
+    );
+    if (!mapped.length) return;
+    await withRetry(
+      () => this.sheetsApi.spreadsheets.values.update({
+        spreadsheetId: this.spreadsheetId,
+        range: sheetA1(tab, 'A2'),
+        valueInputOption: 'RAW',
+        requestBody: { values: mapped },
+      }),
+      retryOpts(this.log, `rewrite ${tab}`),
+    );
+  }
+
   async #ensureHeaderAndLoadKeys(tab, expectedIdentity) {
     const res = await withRetry(
       () => this.sheetsApi.spreadsheets.values.get({
@@ -275,8 +314,14 @@ export class SheetsSink {
       return;
     }
     if (shouldRewriteHeader(header, SHEET_COLUMNS)) {
+      const symbol = sheetDisplaySymbolFromIdentity(expected != null ? expected : stored);
+      const mapped = this.#mapTabRows(header, values.slice(1), symbol);
+      this.log?.info(`updating schema on ${tab}`, { rows: mapped.length });
       await this.#writeHeader(tab);
       if (stored || expected) await this.#writeIdentity(tab, expected != null ? expected : stored);
+      await this.#writeMappedData(tab, mapped);
+      this.#replaceMappedTabKeys(tab, mapped);
+      return;
     }
     const iTime = header.indexOf('candle_time');
     const times = [];
@@ -290,7 +335,7 @@ export class SheetsSink {
     this.#replaceTabKeys(tab, times, incompleteTimes);
   }
 
-  async #retainTabDate(tab, dateStr) {
+  async #retainTabDate(tab, dateStr, instrument) {
     const res = await withRetry(
       () => this.sheetsApi.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
@@ -314,34 +359,16 @@ export class SheetsSink {
       if (t && sheetCandleDate(t) === dateStr) kept.push(row);
     }
     const dropped = data.length - kept.length;
-    const mapped = kept.map((row) => mapSheetRow(header, row));
+    const symbol = instrument?.symbol
+      || sheetDisplaySymbol(instrument)
+      || sheetDisplaySymbolFromIdentity(identityFromHeader(header));
+    const mapped = this.#mapTabRows(header, kept, symbol);
     const extraCols = data.some((row) => (row?.length || 0) > SHEET_COLUMNS.length);
     if (rewriteHeader || dropped > 0 || extraCols) {
       if (rewriteHeader) await this.#writeHeader(tab);
-      await withRetry(
-        () => this.sheetsApi.spreadsheets.values.clear({
-          spreadsheetId: this.spreadsheetId,
-          range: sheetA1(tab, 'A2:Z'),
-        }),
-        retryOpts(this.log, `clear ${tab}`),
-      );
-      if (mapped.length) {
-        await withRetry(
-          () => this.sheetsApi.spreadsheets.values.update({
-            spreadsheetId: this.spreadsheetId,
-            range: sheetA1(tab, 'A2'),
-            valueInputOption: 'RAW',
-            requestBody: { values: mapped },
-          }),
-          retryOpts(this.log, `rewrite ${tab}`),
-        );
-      }
+      await this.#writeMappedData(tab, mapped);
     }
-    this.#replaceTabKeys(
-      tab,
-      mapped.map((row) => row[0]),
-      mapped.filter((row) => sheetRowNeedsPatch(SHEET_COLUMNS, row)).map((row) => row[0]),
-    );
+    this.#replaceMappedTabKeys(tab, mapped);
     return dropped;
   }
 
