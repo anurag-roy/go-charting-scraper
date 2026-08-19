@@ -6,9 +6,12 @@ import {
   allStaticTabNames,
   identityFromHeader,
   mapSheetRow,
+  formatSheetCandleTime,
   rowToSheetValues,
-  selectNewSheetRows,
+  rowHasOhlc,
+  selectSheetWrites,
   sheetCandleDate,
+  sheetRowMissingOhlc,
   sheetRowKey,
   sheetTabName,
   sheetTabNamesFor,
@@ -93,6 +96,7 @@ export class SheetsSink {
     this.spreadsheetId = spreadsheetId;
     this.log = log;
     this.keys = new Set();
+    this.incompleteKeys = new Set();
     this.loadedTabs = new Set();
     this.boundIdentity = new Map();
     this.staticTabsReady = false;
@@ -107,9 +111,7 @@ export class SheetsSink {
     if (!tab) return;
     this.loadedTabs.delete(tab);
     this.boundIdentity.delete(tab);
-    for (const k of [...this.keys]) {
-      if (k.startsWith(`${tab}\t`)) this.keys.delete(k);
-    }
+    this.#forgetTabKeys(tab);
   }
 
   dropInstrument(instrument) {
@@ -228,12 +230,22 @@ export class SheetsSink {
     this.#replaceTabKeys(tab, []);
   }
 
-  #replaceTabKeys(tab, times) {
+  #forgetTabKeys(tab) {
     for (const k of [...this.keys]) {
       if (k.startsWith(`${tab}\t`)) this.keys.delete(k);
     }
+    for (const k of [...this.incompleteKeys]) {
+      if (k.startsWith(`${tab}\t`)) this.incompleteKeys.delete(k);
+    }
+  }
+
+  #replaceTabKeys(tab, times, incompleteTimes = []) {
+    this.#forgetTabKeys(tab);
     for (const t of times || []) {
       if (t) this.keys.add(sheetRowKey(tab, t));
+    }
+    for (const t of incompleteTimes || []) {
+      if (t) this.incompleteKeys.add(sheetRowKey(tab, t));
     }
   }
 
@@ -268,11 +280,14 @@ export class SheetsSink {
     }
     const iTime = header.indexOf('candle_time');
     const times = [];
+    const incompleteTimes = [];
     for (const row of values.slice(1)) {
       const t = iTime >= 0 ? row[iTime] : '';
-      if (t) times.push(t);
+      if (!t) continue;
+      times.push(t);
+      if (sheetRowMissingOhlc(header, row)) incompleteTimes.push(t);
     }
-    this.#replaceTabKeys(tab, times);
+    this.#replaceTabKeys(tab, times, incompleteTimes);
   }
 
   async #retainTabDate(tab, dateStr) {
@@ -322,7 +337,11 @@ export class SheetsSink {
         );
       }
     }
-    this.#replaceTabKeys(tab, mapped.map((row) => row[0]));
+    this.#replaceTabKeys(
+      tab,
+      mapped.map((row) => row[0]),
+      mapped.filter((row) => sheetRowMissingOhlc(SHEET_COLUMNS, row)).map((row) => row[0]),
+    );
     return dropped;
   }
 
@@ -335,23 +354,42 @@ export class SheetsSink {
   }
 
   async writeRows(rows) {
-    const fresh = selectNewSheetRows(this.keys, rows, (row) => this.tabForRow(row));
-    if (!fresh.length) return 0;
-
-    const byTab = new Map();
-    for (const row of fresh) {
+    const tabsNeeded = new Set();
+    for (const row of rows || []) {
       const tab = this.tabForRow(row);
-      if (!byTab.has(tab)) byTab.set(tab, []);
-      byTab.get(tab).push(row);
+      if (tab) tabsNeeded.add(tab);
     }
-
-    let n = 0;
-    for (const [tab, list] of byTab) {
+    for (const tab of tabsNeeded) {
       if (!this.loadedTabs.has(tab)) {
         await this.#ensureTabs([tab]);
         await this.#ensureHeaderAndLoadKeys(tab);
         this.loadedTabs.add(tab);
       }
+    }
+
+    const { append, patch } = selectSheetWrites(
+      this.keys,
+      this.incompleteKeys,
+      rows,
+      (row) => this.tabForRow(row),
+    );
+    if (!append.length && !patch.length) return 0;
+
+    const appendByTab = new Map();
+    for (const row of append) {
+      const tab = this.tabForRow(row);
+      if (!appendByTab.has(tab)) appendByTab.set(tab, []);
+      appendByTab.get(tab).push(row);
+    }
+    const patchByTab = new Map();
+    for (const row of patch) {
+      const tab = this.tabForRow(row);
+      if (!patchByTab.has(tab)) patchByTab.set(tab, []);
+      patchByTab.get(tab).push(row);
+    }
+
+    let n = 0;
+    for (const [tab, list] of appendByTab) {
       const stillNew = list.filter((row) => !this.keys.has(sheetRowKey(tab, row.candle_time)));
       if (!stillNew.length) continue;
       try {
@@ -365,7 +403,12 @@ export class SheetsSink {
           }),
           retryOpts(this.log, `append ${tab}`),
         );
-        for (const row of stillNew) this.keys.add(sheetRowKey(tab, row.candle_time));
+        for (const row of stillNew) {
+          const k = sheetRowKey(tab, row.candle_time);
+          this.keys.add(k);
+          if (rowHasOhlc(row)) this.incompleteKeys.delete(k);
+          else this.incompleteKeys.add(k);
+        }
         n += stillNew.length;
       } catch (err) {
         this.log?.error(`append failed for ${tab}; reloading keys`, err);
@@ -375,6 +418,60 @@ export class SheetsSink {
         throw err;
       }
     }
+
+    for (const [tab, list] of patchByTab) {
+      n += await this.#patchTabRows(tab, list);
+    }
     return n;
+  }
+
+  async #patchTabRows(tab, rows) {
+    const wanted = new Map();
+    for (const row of rows || []) {
+      if (!rowHasOhlc(row)) continue;
+      wanted.set(formatSheetCandleTime(row.candle_time), row);
+    }
+    if (!wanted.size) return 0;
+
+    const res = await withRetry(
+      () => this.sheetsApi.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: sheetA1(tab, 'A:Z'),
+      }),
+      retryOpts(this.log, `read ${tab} for ohlc patch`),
+    );
+    const values = res.data.values || [];
+    const header = values[0] || [];
+    const iTime = header.indexOf('candle_time');
+    if (iTime < 0) return 0;
+
+    const body = values.slice(1);
+    const data = [];
+    for (let i = 0; i < body.length; i += 1) {
+      const existing = body[i] || [];
+      const t = formatSheetCandleTime(existing[iTime]);
+      const next = wanted.get(t);
+      const k = t ? sheetRowKey(tab, t) : '';
+      if (next && sheetRowMissingOhlc(header, existing)) {
+        data.push({
+          range: sheetA1(tab, `A${i + 2}`),
+          values: [rowToSheetValues(next)],
+        });
+        if (k) this.incompleteKeys.delete(k);
+      } else if (next && k) {
+        this.incompleteKeys.delete(k);
+      }
+    }
+    if (!data.length) return 0;
+
+    await withRetry(
+      () => this.sheetsApi.spreadsheets.values.batchUpdate({
+        spreadsheetId: this.spreadsheetId,
+        requestBody: { valueInputOption: 'RAW', data },
+      }),
+      retryOpts(this.log, `patch ohlc ${tab}`),
+    );
+    this.log?.info(`filled missing OHLC on ${tab} (${data.length} row(s))`);
+    return data.length;
   }
 }

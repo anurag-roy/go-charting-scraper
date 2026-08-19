@@ -5,8 +5,11 @@ import {
   formatSheetCandleTime,
   isLegacyVwapHeader,
   mapSheetRow,
+  rowHasOhlc,
   rowToSheetValues,
+  selectSheetWrites,
   sheetCandleDate,
+  sheetRowMissingOhlc,
   sheetTabName,
   allStaticTabNames,
   tabIdentity,
@@ -80,6 +83,29 @@ describe('sheet helpers', () => {
     );
     assert.equal(sheetCandleDate('2026-08-17T09:15:00+05:30'), '2026-08-17');
   });
+
+  it('detects rows that still need an OHLC bar and selects them for patch', () => {
+    assert.equal(rowHasOhlc({ open: 1, close: 2 }), true);
+    assert.equal(rowHasOhlc({ open: '', close: 2 }), false);
+    assert.equal(sheetRowMissingOhlc(SHEET_COLUMNS, [
+      '2026-08-17T09:15:00', '', 110, 99, '', 1, 2, 3, 4, 5, 6, '', '',
+    ]), true);
+    const tab = '1A';
+    const keys = new Set([`${tab}\t2026-08-17T09:15:00`, `${tab}\t2026-08-17T09:17:00`]);
+    const incomplete = new Set([`${tab}\t2026-08-17T09:15:00`]);
+    const { append, patch } = selectSheetWrites(
+      keys,
+      incomplete,
+      [
+        { ok: true, slot: 1, intervals: ['2m'], interval: '2m', candle_time: '2026-08-17T09:15:00+05:30', open: 100, close: 105 },
+        { ok: true, slot: 1, intervals: ['2m'], interval: '2m', candle_time: '2026-08-17T09:17:00+05:30', open: 106, close: 107 },
+        { ok: true, slot: 1, intervals: ['2m'], interval: '2m', candle_time: '2026-08-17T09:19:00+05:30', open: 108, close: 109 },
+      ],
+      () => tab,
+    );
+    assert.deepEqual(append.map((r) => r.candle_time), ['2026-08-17T09:19:00+05:30']);
+    assert.deepEqual(patch.map((r) => r.candle_time), ['2026-08-17T09:15:00+05:30']);
+  });
 });
 
 describe('SheetsSink', () => {
@@ -121,6 +147,67 @@ describe('SheetsSink', () => {
       '2026-08-17T09:15:00', 1, 2, 1, 1.5, 1,
     ]);
     assert.equal(appended[1].range, sheetA1(tab5, 'A1'));
+    assert.equal(sink.incompleteKeys.has(`${tab2}\t2026-08-17T09:17:00`), true);
+    assert.equal(sink.incompleteKeys.has(`${tab2}\t2026-08-17T09:15:00`), false);
+  });
+
+  it('patches existing rows that were stored without open/close', async () => {
+    const tab = sheetTabName(1, 0);
+    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
+    sink.loadedTabs.add(tab);
+    sink.keys.add(`${tab}\t2026-08-17T09:15:00`);
+    sink.incompleteKeys.add(`${tab}\t2026-08-17T09:15:00`);
+    const calls = { get: [], batchUpdate: [], append: [] };
+    sink.sheetsApi = {
+      spreadsheets: {
+        values: {
+          get: async (req) => {
+            calls.get.push(req);
+            return {
+              data: {
+                values: [
+                  SHEET_COLUMNS,
+                  ['2026-08-17T09:15:00', '', 110, 99, '', 1, 2, 3, 4, 5, 6, '', ''],
+                ],
+              },
+            };
+          },
+          batchUpdate: async (req) => {
+            calls.batchUpdate.push(req);
+            return {};
+          },
+          append: async (req) => {
+            calls.append.push(req);
+            return {};
+          },
+        },
+      },
+    };
+
+    const n = await sink.writeRows([
+      {
+        ok: true,
+        slot: 1,
+        intervals: ['2m', '3m', '5m'],
+        interval: '2m',
+        candle_time: '2026-08-17T09:15:00+05:30',
+        open: 100,
+        high: 110,
+        low: 99,
+        close: 105,
+        delta: 1,
+        oi_change: 12,
+        vwap: 101.5,
+      },
+    ]);
+    assert.equal(n, 1);
+    assert.equal(calls.append.length, 0);
+    assert.equal(calls.batchUpdate.length, 1);
+    assert.equal(calls.batchUpdate[0].requestBody.data[0].range, sheetA1(tab, 'A2'));
+    assert.deepEqual(calls.batchUpdate[0].requestBody.data[0].values[0].slice(0, 5), [
+      '2026-08-17T09:15:00', 100, 110, 99, 105,
+    ]);
+    assert.equal(sink.incompleteKeys.has(`${tab}\t2026-08-17T09:15:00`), false);
   });
 
   it('dropInstrument forgets old keys for that slot and leaves other slots', () => {
@@ -129,10 +216,12 @@ describe('SheetsSink', () => {
     const keepTab = sheetTabName(2, 0);
     sink.keys.add(`${oldTab}\t2026-08-17T09:15:00`);
     sink.keys.add(`${keepTab}\t2026-08-17T09:15:00`);
+    sink.incompleteKeys.add(`${oldTab}\t2026-08-17T09:15:00`);
     sink.loadedTabs.add(oldTab);
     sink.loadedTabs.add(keepTab);
     sink.dropInstrument({ slot: 1, intervals: ['2m', '3m', '5m'] });
     assert.equal(sink.keys.has(`${oldTab}\t2026-08-17T09:15:00`), false);
+    assert.equal(sink.incompleteKeys.has(`${oldTab}\t2026-08-17T09:15:00`), false);
     assert.equal(sink.keys.has(`${keepTab}\t2026-08-17T09:15:00`), true);
     assert.equal(sink.loadedTabs.has(oldTab), false);
   });

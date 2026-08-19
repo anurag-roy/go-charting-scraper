@@ -341,7 +341,9 @@ export class Supervisor {
       });
 
       for (const s of summaries) {
-        this.log.info(`  ${s.id} ${s.interval}: closed=${s.closed}/${s.candles}${s.error ? ` err=${s.error}` : ''}`);
+        this.log.info(
+          `  ${s.id} ${s.interval}: closed=${s.closed}/${s.candles} ohlc=${s.ohlcBars ?? 0} miss=${s.ohlcMiss ?? 0}${s.error ? ` err=${s.error}` : ''}`,
+        );
       }
 
       let wrote = 0;

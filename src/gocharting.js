@@ -4,7 +4,20 @@ import protobuf from 'protobufjs';
 import path from 'node:path';
 import { symbolId } from './instruments.js';
 import { formatIst } from './session.js';
-import { num } from './util.js';
+import { num, sleep } from './util.js';
+
+/**
+ * Pick the lowest TS/V2 `idxs` value not already in use.
+ * The server treats `idxs` as a chart-pane slot: concurrent `add`s with the
+ * same index overwrite each other, so every in-flight OHLC request needs its
+ * own index. Sharing `indexOf(interval)` made every 2m (or 3m) request collide.
+ */
+export function allocOhlcIdx(inUse) {
+  let i = 0;
+  while (inUse.has(i)) i += 1;
+  inUse.add(i);
+  return i;
+}
 
 export async function loadProtos(protoDir) {
   const root = await protobuf.load(path.join(protoDir, 'footprint.proto'));
@@ -152,6 +165,7 @@ export class FootprintClient {
     this.nextId = 9000;
     this.pending = new Map();
     this.nativeIntervals = new Set();
+    this.ohlcIdxInUse = new Set();
   }
 
   get readyState() {
@@ -170,6 +184,7 @@ export class FootprintClient {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       if (p.quiet) clearTimeout(p.quiet);
+      if (p.kind === 'ohlc') this.#releaseOhlcIdx(p.idx);
       p.resolve({ ok: false, error });
     }
     this.pending.clear();
@@ -333,6 +348,8 @@ export class FootprintClient {
     if (p.quiet) clearTimeout(p.quiet);
     this.pending.delete(requestId);
     if (p.kind === 'ohlc') {
+      this.#releaseOhlcIdx(p.idx);
+      this.#removeOhlc(p);
       p.resolve({
         ok: p.bars.length > 0,
         interval: p.interval,
@@ -393,19 +410,47 @@ export class FootprintClient {
     return last;
   }
 
-  #ohlcIdx(interval) {
-    const iv = String(interval || '').trim();
-    let i = this.intervals.indexOf(iv);
-    if (i < 0) {
-      this.intervals.push(iv);
-      i = this.intervals.length - 1;
-    }
-    return i;
+  #allocOhlcIdx() {
+    return allocOhlcIdx(this.ohlcIdxInUse);
   }
 
-  requestOhlc(instrument, interval, timeoutMs = 12_000) {
+  #releaseOhlcIdx(idx) {
+    if (idx == null) return;
+    this.ohlcIdxInUse.delete(idx);
+  }
+
+  #removeOhlc(p) {
+    if (!p || p.idx == null || !this.isOpen()) return;
+    try {
+      this.send({
+        request_id: this.nextId++,
+        command: 'TS/V2',
+        action: 'remove',
+        payload: {
+          msg_type: 'OHLCV/V2',
+          symbol: p.symbolKey,
+          interval: p.interval,
+          session: this.sessionType,
+          idxs: [p.idx],
+        },
+      });
+    } catch {
+      /* socket already closing */
+    }
+  }
+
+  async requestOhlc(instrument, interval, timeoutMs = 12_000) {
+    let res = await this.#requestOhlcOnce(instrument, interval, timeoutMs);
+    if (res.ok && res.bars.length) return res;
+    this.log?.warn(`ohlc empty ${symbolId(instrument)} ${interval}; retrying`);
+    await sleep(400);
+    return this.#requestOhlcOnce(instrument, interval, timeoutMs);
+  }
+
+  #requestOhlcOnce(instrument, interval, timeoutMs = 12_000) {
     const request_id = this.nextId++;
     const symbolKey = symbolId(instrument);
+    const idx = this.#allocOhlcIdx();
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (!this.pending.has(String(request_id))) return;
@@ -416,6 +461,7 @@ export class FootprintClient {
         kind: 'ohlc',
         interval,
         symbolKey,
+        idx,
         bars: [],
         extra: {},
         resolve,
@@ -432,7 +478,7 @@ export class FootprintClient {
           interval,
           session: this.sessionType,
           hint: 'rows=500',
-          idxs: [this.#ohlcIdx(interval)],
+          idxs: [idx],
         },
       });
     });

@@ -157,17 +157,41 @@ export function rowToSheetValues(row) {
   });
 }
 
-export function selectNewSheetRows(keys, rows, tabForRow) {
-  const out = [];
+export function isFilledOhlcValue(v) {
+  if (v == null) return false;
+  return String(v).trim() !== '';
+}
+
+export function rowHasOhlc(row) {
+  return isFilledOhlcValue(row?.open) && isFilledOhlcValue(row?.close);
+}
+
+/** True when a stored sheet row is missing open or close (footprint-only fallback). */
+export function sheetRowMissingOhlc(header, values) {
+  const cols = Array.isArray(header) && header.length ? header : SHEET_COLUMNS;
+  const iOpen = cols.indexOf('open');
+  const iClose = cols.indexOf('close');
+  const open = iOpen >= 0 ? values?.[iOpen] : values?.[1];
+  const close = iClose >= 0 ? values?.[iClose] : values?.[4];
+  return !isFilledOhlcValue(open) || !isFilledOhlcValue(close);
+}
+
+export function selectSheetWrites(keys, incompleteKeys, rows, tabForRow) {
+  const append = [];
+  const patch = [];
   for (const row of rows || []) {
     if (!row?.ok || !row.candle_time) continue;
     const tab = tabForRow(row);
     if (!tab) continue;
     const k = sheetRowKey(tab, row.candle_time);
-    if (keys.has(k)) continue;
-    out.push(row);
+    if (!keys.has(k)) append.push(row);
+    else if (incompleteKeys?.has(k) && rowHasOhlc(row)) patch.push(row);
   }
-  return out;
+  return { append, patch };
+}
+
+export function selectNewSheetRows(keys, rows, tabForRow) {
+  return selectSheetWrites(keys, null, rows, tabForRow).append;
 }
 
 export function rowToCsvLine(row) {
