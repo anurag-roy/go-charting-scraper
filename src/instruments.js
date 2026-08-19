@@ -122,7 +122,7 @@ export function parseConfigRows(rows) {
       }
       if (seen.has(inst.id)) return;
       seen.add(inst.id);
-      instruments.push({ ...inst, intervals: parsed.intervals });
+      instruments.push({ ...inst, slot: idx + 1, intervals: parsed.intervals });
     } catch (err) {
       errors.push(err.message || String(err));
     }
@@ -136,6 +136,7 @@ export function configFingerprint(cfg) {
     email: cfg?.email || '',
     password: cfg?.password || '',
     instruments: (cfg?.instruments || []).map((i) => ({
+      slot: i.slot,
       id: i.id,
       intervals: instrumentIntervals(i),
     })),
@@ -147,25 +148,42 @@ export function configSummary(cfg) {
     email: cfg?.email || '',
     passwordSet: Boolean(cfg?.password),
     instruments: (cfg?.instruments || []).map((i) => ({
+      slot: i.slot,
       id: i.id,
       intervals: instrumentIntervals(i),
     })),
   };
 }
 
+export function instrumentSlot(instrument, fallbackIndex = 0) {
+  const n = Number(instrument?.slot);
+  if (Number.isInteger(n) && n >= 1) return n;
+  return fallbackIndex + 1;
+}
+
 export function reconcileInstruments(prev, next) {
   const prevList = prev || [];
   const nextList = next || [];
-  const prevIds = new Set(prevList.map((i) => i.id));
-  const nextIds = new Set(nextList.map((i) => i.id));
-  const prevById = new Map(prevList.map((i) => [i.id, i]));
-  const kept = nextList.filter((i) => prevIds.has(i.id));
-  return {
-    added: nextList.filter((i) => !prevIds.has(i.id)),
-    removed: prevList.filter((i) => !nextIds.has(i.id)),
-    kept,
-    updated: kept.filter((i) => !sameIntervals(prevById.get(i.id)?.intervals, i.intervals)),
-  };
+  const prevBySlot = new Map(prevList.map((i, idx) => [instrumentSlot(i, idx), i]));
+  const nextBySlot = new Map(nextList.map((i, idx) => [instrumentSlot(i, idx), i]));
+  const slots = [...new Set([...prevBySlot.keys(), ...nextBySlot.keys()])].sort((a, b) => a - b);
+  const added = [];
+  const removed = [];
+  const replaced = [];
+  const kept = [];
+  const updated = [];
+  for (const slot of slots) {
+    const a = prevBySlot.get(slot);
+    const b = nextBySlot.get(slot);
+    if (!a && b) added.push(b);
+    else if (a && !b) removed.push(a);
+    else if (a.id !== b.id) replaced.push({ from: a, to: b });
+    else {
+      kept.push(b);
+      if (!sameIntervals(a.intervals, b.intervals)) updated.push(b);
+    }
+  }
+  return { added, removed, replaced, kept, updated };
 }
 
 export function isUsableConfig(cfg) {

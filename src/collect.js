@@ -26,6 +26,8 @@ export function candleToRow({
     sampled_at_ist,
     sample_n,
     interval,
+    slot: instrument.slot,
+    intervals: instrumentIntervals(instrument),
     symbol: symbolId(instrument),
     contract: instrument.symbol,
     candle_time: stats.candle_time || '',

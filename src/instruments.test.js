@@ -101,6 +101,7 @@ describe('parseConfigRows', () => {
       'BSE:FUTURE:SENSEX-I',
       'MCX:FUTURE:GOLD-I',
     ]);
+    assert.deepEqual(cfg.instruments.map((i) => i.slot), [1, 2, 3, 4, 5, 6]);
     assert.deepEqual(cfg.instruments[0].intervals, ['2m', '3m', '5m']);
     assert.deepEqual(cfg.errors, []);
     assert.deepEqual(cfg.warnings, []);
@@ -118,11 +119,11 @@ describe('parseConfigRows', () => {
       ['Instrument6'],
     ]);
     assert.deepEqual(
-      cfg.instruments.map((i) => ({ id: i.id, intervals: i.intervals })),
+      cfg.instruments.map((i) => ({ slot: i.slot, id: i.id, intervals: i.intervals })),
       [
-        { id: 'NSE:FUTURE:NIFTY-I', intervals: ['2m', '3m', '5m'] },
-        { id: 'NSE:OPTIONS:NIFTY2681824100CE', intervals: ['5m', '10m'] },
-        { id: 'NSE:OPTIONS:NIFTY2681824300CE', intervals: ['15m'] },
+        { slot: 1, id: 'NSE:FUTURE:NIFTY-I', intervals: ['2m', '3m', '5m'] },
+        { slot: 2, id: 'NSE:OPTIONS:NIFTY2681824100CE', intervals: ['5m', '10m'] },
+        { slot: 3, id: 'NSE:OPTIONS:NIFTY2681824300CE', intervals: ['15m'] },
       ],
     );
   });
@@ -148,6 +149,7 @@ describe('parseConfigRows', () => {
       ['instrument3', 'NOPE', '2m'],
     ]);
     assert.deepEqual(cfg.instruments.map((i) => i.id), ['NSE:FUTURE:NIFTY-I']);
+    assert.equal(cfg.instruments[0].slot, 1);
     assert.deepEqual(cfg.instruments[0].intervals, ['2m']);
     assert.equal(cfg.errors.length, 1);
   });
@@ -158,14 +160,25 @@ describe('parseConfigRows', () => {
 });
 
 describe('reconcileInstruments', () => {
-  const x = { ...parseInstrumentId('NSE:FUTURE:NIFTY-I'), intervals: ['2m', '3m', '5m'] };
-  const y = { ...parseInstrumentId('MCX:FUTURE:CRUDEOIL-I'), intervals: ['5m'] };
+  const x = { ...parseInstrumentId('NSE:FUTURE:NIFTY-I'), slot: 1, intervals: ['2m', '3m', '5m'] };
+  const y = { ...parseInstrumentId('MCX:FUTURE:CRUDEOIL-I'), slot: 1, intervals: ['5m'] };
+  const ySlot2 = { ...parseInstrumentId('MCX:FUTURE:CRUDEOIL-I'), slot: 2, intervals: ['5m'] };
 
-  it('detects X -> Y without implying deletion of X sheets', () => {
-    const { added, removed, kept } = reconcileInstruments([x], [y]);
-    assert.deepEqual(added.map((i) => i.id), [y.id]);
-    assert.deepEqual(removed.map((i) => i.id), [x.id]);
+  it('replaces the same slot without implying deletion of sheets', () => {
+    const { added, removed, replaced, kept } = reconcileInstruments([x], [y]);
+    assert.deepEqual(added, []);
+    assert.deepEqual(removed, []);
+    assert.equal(replaced.length, 1);
+    assert.equal(replaced[0].from.id, x.id);
+    assert.equal(replaced[0].to.id, y.id);
     assert.deepEqual(kept, []);
+  });
+
+  it('treats a new slot as added', () => {
+    const { added, removed, replaced } = reconcileInstruments([x], [x, ySlot2]);
+    assert.deepEqual(added.map((i) => i.slot), [2]);
+    assert.deepEqual(removed, []);
+    assert.deepEqual(replaced, []);
   });
 
   it('detects timeframe changes on a kept instrument', () => {

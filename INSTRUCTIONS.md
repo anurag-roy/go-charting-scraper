@@ -95,8 +95,11 @@ You do not need this to operate it. It explains outbound hosts and secrets.
    compressed). They are decoded with
    `investigation/evidence/footprint.proto` and
    `investigation/evidence/ohlc_bars.proto`.
-7. Closed candles in that exchange’s session window are appended to tabs
-   named `{symbol} {interval}` (for example `NIFTY-I 5m`).
+7. Closed candles in that exchange’s session window are written to **static**
+   tabs `1A`, `1B`, `1C`, `2A`, … (Instrument1’s first timeframe → `1A`,
+   Instrument2’s first timeframe → `2A`). If the symbol or timeframe for a
+   slot changes, the data inside that tab is overwritten; the tab name stays
+   the same.
 
 There is **no REST/JSON endpoint** for these numbers. Do not scrape the DOM.
 A headless browser is unnecessary: login is a single Cognito HTTP call.
@@ -287,8 +290,8 @@ From the **repo root**, with `.env` filled in:
 ONCE=1 npm start
 ```
 
-`ONCE=1` means: read `config`, authenticate, create any missing
-`{symbol} {interval}` tabs, drop rows that are not from **today’s IST date**,
+`ONCE=1` means: read `config`, authenticate, create any missing static tabs
+(`1A`, `1B`, `1C`, …), drop rows that are not from **today’s IST date**,
 backfill already-closed candles for today’s session (if the market is open
 or already closed today), then exit. Use this as a smoke test before systemd.
 
@@ -296,8 +299,8 @@ or already closed today), then exit. Use this as a smoke test before systemd.
 
 ```text
 INFO go-charting-scraper { once: true, sheet: '…' }
-INFO config applied { email: '…', passwordSet: true, instruments: [ { id: 'NSE:FUTURE:NIFTY-I', intervals: [ '2m', '3m', '5m' ] }, … ] }
-INFO start monitoring NSE:FUTURE:NIFTY-I 2m, 3m, 5m
+INFO config applied { email: '…', passwordSet: true, instruments: [ { slot: 1, id: 'NSE:FUTURE:NIFTY-I', intervals: [ '2m', '3m', '5m' ] }, … ] }
+INFO start monitoring slot 1 NSE:FUTURE:NIFTY-I 2m, 3m, 5m
 INFO connecting websocket not open
 INFO sample 1 NSE:FUTURE:NIFTY-I/backfill, …
 INFO   NSE:FUTURE:NIFTY-I 2m: closed=193/193
@@ -315,7 +318,7 @@ Checklist:
 | Check | Meaning |
 | --- | --- |
 | `config applied` with `passwordSet: true` | `config` tab parsed |
-| `start monitoring …` | Tabs `{symbol} {interval}` ensured |
+| `start monitoring …` | Static tabs `1A` / `1B` / `1C` (etc.) ensured |
 | `closed=` > 0 during/after the session | Closed bars decoded |
 | `wrote N new closed-candle row(s)` | Rows appended to the spreadsheet |
 | Second run writes `0` | Dedup by tab + `candle_time` |
@@ -360,21 +363,32 @@ spreadsheet id are required.
 
 ## 10. Candle tabs and columns
 
-Each instrument gets one tab per configured timeframe, named from the
-**symbol only** (no exchange or category) plus the interval:
+Tabs are named from the **config slot** and the **timeframe letter**, not from
+the symbol. `Instrument1` always writes `1A`, `1B`, `1C`; `Instrument2` writes
+`2A`, `2B`, `2C`; and so on. Column C is letter A, D is B, E is C. Extra
+timeframes in F onward become `1D`, `1E`, …
 
-| Instrument on `config` | Example timeframes | Tabs |
+| Config row | Example timeframes | Tabs |
 | --- | --- | --- |
-| `NSE:FUTURE:NIFTY-I` | `2m`, `3m`, `5m` | `NIFTY-I 2m`, `NIFTY-I 3m`, `NIFTY-I 5m` |
-| `MCX:FUTURE:CRUDEOIL-I` | `5m`, `10m` | `CRUDEOIL-I 5m`, `CRUDEOIL-I 10m` |
-| `NSE:OPTIONS:NIFTY2681824300CE` | `15m` | `NIFTY2681824300CE 15m` |
+| Instrument1 `NSE:FUTURE:NIFTY-I` | `2m`, `3m`, `5m` | `1A`, `1B`, `1C` |
+| Instrument2 `MCX:FUTURE:CRUDEOIL-I` | `5m`, `10m` | `2A`, `2B` (`2C` stays empty) |
+| Instrument3 `NSE:OPTIONS:NIFTY2681824300CE` | `15m` | `3A` |
 
-The `config` tab is never renamed. Missing data tabs are created on first
-monitor. Existing `candle_time` values are not duplicated. Each data tab
-keeps **only the current IST day’s rows** — previous-day candles are deleted
-when the calendar date changes (typically overnight / early morning).
+The eighteen tabs `1A`–`6C` are created if missing and **never deleted**.
+Point VLOOKUP / INDEX formulas at those names; they stay stable when you
+change a symbol or timeframe. Column AA on each data tab records which
+instrument and interval currently occupy it (`1|2m|NSE:FUTURE:NIFTY-I`).
+Leave A:M for your formulas.
 
-Sheet schema (9 columns) is listed in [§1](#1-what-you-get). Optional CSV
+If you change the symbol or a timeframe cell while the market is open, the
+scraper **overwrites the rows inside** that slot’s tabs and backfills today.
+Existing `candle_time` values on an unchanged tab are not duplicated. Each
+data tab still keeps **only the current IST day’s rows**.
+
+Older spreadsheets may still have leftover `{symbol} {interval}` tabs from
+earlier versions; those are left in place and no longer written.
+
+Sheet schema is listed in [§1](#1-what-you-get). Optional CSV
 (`WRITE_CSV=1`) keeps a wider debug schema including OHLC and recompute
 columns.
 
@@ -420,13 +434,15 @@ Edit `Instrument1` … `Instrument6` on the `config` tab, including the
 timeframe cells on each row. Within about 5 seconds the process:
 
 1. Stops requesting the old symbol (X), or old timeframes if only those changed.
-2. Creates `{Y} {interval}` tabs for each listed timeframe if they do not exist.
-3. Backfills Y (or the newly added timeframes) for **today’s** session (if today is a trading day).
-4. Starts live monitoring of Y.
+2. **Overwrites** the data inside that slot’s static tabs (`1A` / `1B` / `1C`
+   for Instrument1, and so on). Tab names do not change. Sheets are never
+   deleted.
+3. Backfills the new symbol (or the newly listed timeframes) for **today’s**
+   session (if today is a trading day).
+4. Starts live monitoring of the new configuration.
 
-**X’s tabs are not deleted**, and tabs for timeframes you remove from a row
-are left in place. Historical rows stay until the next IST date change, when
-every data tab is reduced to the current day only.
+Point VLOOKUP formulas at `1A`, `1B`, `1C`, … so they keep working after a
+symbol or timeframe change.
 
 If the email/password cells change, the new login is attempted first. A bad
 password is logged and the previous Cognito session is kept.
@@ -555,7 +571,10 @@ covers that).
 - It does **not** write the forming candle; only closed bars.
 - It does **not** subscribe to the live `trade` tape; it re-fetches footprint
   snapshots. That is enough for 15s polling of closed bars.
-- It does **not** delete old symbol tabs when you change an instrument.
+- It does **not** rename or delete data tabs. `1A`–`6C` stay in place; only
+  the rows inside them change.
+- It **does** overwrite a slot’s tabs when you change that row’s symbol or
+  timeframes, then backfill today.
 - It **does** delete previous-day candle rows each IST morning so tabs hold
   only the current day.
 - It does **not** take GoCharting credentials from `.env`.
@@ -576,7 +595,7 @@ covers that).
 | `closed=0` / `no candles` | Holiday, wrong symbol, or before first bar | Confirm the instrument string in the GoCharting UI. After hours **today**, a backfill of today’s session is expected; previous weekdays are not rewritten. |
 | No new NSE rows after 15:40 | Last bars already flushed | Wait until 15:40 + `CLOSE_GRACE_MS`. MCX may still be live. |
 | Duplicate worry on restart | — | Keys are reloaded from each tab; a second `ONCE=1` should write 0. |
-| New instrument, no new tabs | Service account cannot write | Re-share the spreadsheet as Editor. `journalctl` / `logs/error.log`. |
+| Static tabs `1A`–`6C` missing / not writable | Service account cannot write | Re-share the spreadsheet as Editor. `journalctl` / `logs/error.log`. |
 | Process killed (137) | OOM | Unusual (~128–256 MB). Check the host. |
 | Works on SSH but not systemd | Different user / no env | See [§13](#13-linux-server-systemd). `journalctl -u gocharting-scraper.service`. |
 

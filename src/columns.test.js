@@ -8,6 +8,8 @@ import {
   rowToSheetValues,
   sheetCandleDate,
   sheetTabName,
+  allStaticTabNames,
+  tabIdentity,
   csvRowKey,
   selectNewCsvRows,
   shouldRewriteHeader,
@@ -16,10 +18,14 @@ import { ConfigSheet, SheetsSink, sheetA1 } from './sheets.js';
 import { closedRowsForInterval } from './collect.js';
 
 describe('sheet helpers', () => {
-  it('names tabs with the contract id and 2m/3m/5m', () => {
-    assert.equal(sheetTabName('NIFTY2681824300CE', '2m'), 'NIFTY2681824300CE 2m');
-    assert.equal(sheetTabName('CRUDEOIL-I', '3m'), 'CRUDEOIL-I 3m');
-    assert.equal(sheetTabName('NIFTY-I', '5m'), 'NIFTY-I 5m');
+  it('names tabs from the config slot and timeframe letter', () => {
+    assert.equal(sheetTabName(1, 0), '1A');
+    assert.equal(sheetTabName(1, 1), '1B');
+    assert.equal(sheetTabName(1, 2), '1C');
+    assert.equal(sheetTabName(2, 0), '2A');
+    assert.equal(sheetTabName(6, 2), '6C');
+    assert.deepEqual(allStaticTabNames(2, 3), ['1A', '1B', '1C', '2A', '2B', '2C']);
+    assert.equal(tabIdentity(1, '2m', 'NSE:FUTURE:NIFTY-I'), '1|2m|NSE:FUTURE:NIFTY-I');
   });
 
   it('strips a trailing timezone offset from candle_time', () => {
@@ -73,11 +79,18 @@ describe('sheet helpers', () => {
 });
 
 describe('SheetsSink', () => {
-  it('appends unseen rows grouped by symbol+interval tab', async () => {
+  function identityHeader(identity) {
+    const header = [...SHEET_COLUMNS];
+    while (header.length < 26) header.push('');
+    header.push(identity);
+    return header;
+  }
+
+  it('appends unseen rows grouped by static slot tabs', async () => {
     const appended = [];
     const sink = new SheetsSink({ spreadsheetId: 'sheet' });
-    const tab2 = sheetTabName('NIFTY2681824300CE', '2m');
-    const tab5 = sheetTabName('CRUDEOIL-I', '5m');
+    const tab2 = sheetTabName(1, 0);
+    const tab5 = sheetTabName(2, 2);
     sink.loadedTabs.add(tab2);
     sink.loadedTabs.add(tab5);
     sink.sheetsApi = {
@@ -92,11 +105,13 @@ describe('SheetsSink', () => {
     };
 
     const n = await sink.writeRows([
-      { ok: true, contract: 'NIFTY2681824300CE', interval: '2m', candle_time: '2026-08-17T09:15:00+05:30', open: 1, high: 2, low: 1, close: 1.5, delta: 1 },
-      { ok: true, contract: 'NIFTY2681824300CE', interval: '2m', candle_time: '2026-08-17T09:17:00+05:30', delta: 2 },
-      { ok: true, contract: 'CRUDEOIL-I', interval: '5m', candle_time: '2026-08-17T09:15:00+05:30', delta: 3 },
+      { ok: true, slot: 1, intervals: ['2m', '3m', '5m'], interval: '2m', candle_time: '2026-08-17T09:15:00+05:30', open: 1, high: 2, low: 1, close: 1.5, delta: 1 },
+      { ok: true, slot: 1, intervals: ['2m', '3m', '5m'], interval: '2m', candle_time: '2026-08-17T09:17:00+05:30', delta: 2 },
+      { ok: true, slot: 2, intervals: ['2m', '3m', '5m'], interval: '5m', candle_time: '2026-08-17T09:15:00+05:30', delta: 3 },
     ]);
     assert.equal(n, 3);
+    assert.equal(tab2, '1A');
+    assert.equal(tab5, '2C');
     assert.equal(appended[0].range, sheetA1(tab2, 'A1'));
     assert.deepEqual(appended[0].requestBody.values[0].slice(0, 6), [
       '2026-08-17T09:15:00', 1, 2, 1, 1.5, 1,
@@ -104,22 +119,22 @@ describe('SheetsSink', () => {
     assert.equal(appended[1].range, sheetA1(tab5, 'A1'));
   });
 
-  it('dropInstrument forgets old keys and leaves other symbols', () => {
+  it('dropInstrument forgets old keys for that slot and leaves other slots', () => {
     const sink = new SheetsSink({ spreadsheetId: 'sheet' });
-    const oldTab = sheetTabName('NIFTY-I', '2m');
-    const keepTab = sheetTabName('CRUDEOIL-I', '2m');
+    const oldTab = sheetTabName(1, 0);
+    const keepTab = sheetTabName(2, 0);
     sink.keys.add(`${oldTab}\t2026-08-17T09:15:00`);
     sink.keys.add(`${keepTab}\t2026-08-17T09:15:00`);
     sink.loadedTabs.add(oldTab);
     sink.loadedTabs.add(keepTab);
-    sink.dropInstrument('NIFTY-I', ['2m', '3m', '5m']);
+    sink.dropInstrument({ slot: 1, intervals: ['2m', '3m', '5m'] });
     assert.equal(sink.keys.has(`${oldTab}\t2026-08-17T09:15:00`), false);
     assert.equal(sink.keys.has(`${keepTab}\t2026-08-17T09:15:00`), true);
     assert.equal(sink.loadedTabs.has(oldTab), false);
   });
 
   it('retainSession drops previous-day rows and keeps today on the current schema', async () => {
-    const tab = sheetTabName('NIFTY-I', '2m');
+    const tab = sheetTabName(1, 0);
     const today = [
       '2026-08-18T09:15:00', 100, 110, 99, 105, 8, 9, 10, 11, 12, 13, 14, 20.2,
     ];
@@ -149,7 +164,10 @@ describe('SheetsSink', () => {
       },
     };
 
-    const dropped = await sink.retainSession('NIFTY-I', ['2m'], '2026-08-18');
+    const dropped = await sink.retainSession(
+      { slot: 1, symbol: 'NIFTY-I', id: 'NSE:FUTURE:NIFTY-I', intervals: ['2m'] },
+      '2026-08-18',
+    );
     assert.equal(dropped, 1);
     assert.equal(calls.clear.length, 1);
     assert.equal(calls.update.length, 1);
@@ -159,7 +177,7 @@ describe('SheetsSink', () => {
   });
 
   it('retainSession remaps vwap1 onto vwap while keeping OHLC', async () => {
-    const tab = sheetTabName('NIFTY-I', '2m');
+    const tab = sheetTabName(1, 0);
     const legacyHeader = [
       'candle_time', 'open', 'high', 'low', 'close',
       'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
@@ -191,7 +209,10 @@ describe('SheetsSink', () => {
       },
     };
 
-    const dropped = await sink.retainSession('NIFTY-I', ['2m'], '2026-08-18');
+    const dropped = await sink.retainSession(
+      { slot: 1, symbol: 'NIFTY-I', id: 'NSE:FUTURE:NIFTY-I', intervals: ['2m'] },
+      '2026-08-18',
+    );
     assert.equal(dropped, 1);
     assert.equal(calls.clear.length, 1);
     assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
@@ -200,6 +221,49 @@ describe('SheetsSink', () => {
     ]);
     assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
     assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), true);
+  });
+
+  it('overwrites a static tab when the symbol or timeframe changes', async () => {
+    const tab = sheetTabName(1, 0);
+    const calls = { get: [], update: [], clear: [], batchUpdate: [] };
+    const titles = new Set(['1A', '1B', '1C']);
+    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
+    sink.sheetsApi = {
+      spreadsheets: {
+        get: async () => ({ data: { sheets: [...titles].map((title) => ({ properties: { title } })) } }),
+        batchUpdate: async (req) => { calls.batchUpdate.push(req); return {}; },
+        values: {
+          get: async (req) => {
+            calls.get.push(req);
+            return {
+              data: {
+                values: [
+                  identityHeader('1|2m|NSE:FUTURE:NIFTY-I'),
+                  ['2026-08-17T09:15:00', 90, 95, 88, 92, 1, 2, 3, 4, 5, 6, 7, 10.1],
+                ],
+              },
+            };
+          },
+          update: async (req) => { calls.update.push(req); return {}; },
+          clear: async (req) => { calls.clear.push(req); return {}; },
+        },
+      },
+    };
+
+    await sink.ensureInstrument({
+      slot: 1,
+      symbol: 'NIFTY2681824300CE',
+      id: 'NSE:OPTIONS:NIFTY2681824300CE',
+      intervals: ['5m'],
+    });
+    assert.equal(calls.clear.length > 0, true);
+    assert.equal(
+      calls.update.some((req) => req.range === sheetA1(tab, 'AA1')
+        && req.requestBody.values[0][0] === '1|5m|NSE:OPTIONS:NIFTY2681824300CE'),
+      true,
+    );
+    assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
+    assert.equal(calls.batchUpdate.length, 0);
   });
 });
 
@@ -220,6 +284,8 @@ describe('closedRowsForInterval', () => {
     segment: 'FUTURE',
     symbol: 'NIFTY-I',
     id: 'NSE:FUTURE:NIFTY-I',
+    slot: 1,
+    intervals: ['5m'],
   };
   const sessionOpts = { open: '09:15', close: '15:40', graceMs: 2000 };
 
@@ -245,6 +311,8 @@ describe('closedRowsForInterval', () => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].candle_time, '2026-08-17T09:15:00+05:30');
     assert.equal(rows[0].contract, 'NIFTY-I');
+    assert.equal(rows[0].slot, 1);
+    assert.deepEqual(rows[0].intervals, ['5m']);
     assert.equal(rows[0].ok, true);
     assert.equal(rows[0].open, 1);
     assert.equal(rows[0].high, 2);
@@ -289,10 +357,10 @@ describe('ConfigSheet', () => {
     const cfg = await sheet.read();
     assert.equal(ranges[0], sheetA1('config', 'A1:Z100'));
     assert.deepEqual(
-      cfg.instruments.map((i) => ({ id: i.id, intervals: i.intervals })),
+      cfg.instruments.map((i) => ({ slot: i.slot, id: i.id, intervals: i.intervals })),
       [
-        { id: 'NSE:FUTURE:NIFTY-I', intervals: ['2m', '3m', '5m'] },
-        { id: 'NSE:OPTIONS:NIFTY2681824100CE', intervals: ['5m', '10m'] },
+        { slot: 1, id: 'NSE:FUTURE:NIFTY-I', intervals: ['2m', '3m', '5m'] },
+        { slot: 2, id: 'NSE:OPTIONS:NIFTY2681824100CE', intervals: ['5m', '10m'] },
       ],
     );
     assert.equal(cfg.warnings.length, 1);

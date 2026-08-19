@@ -63,12 +63,64 @@ export function formatSheetCandleTime(iso) {
   return String(iso || '').replace(/[+-]\d{2}:\d{2}$/, '');
 }
 
-/** Tab title: contract id + interval, e.g. `NIFTY2681824300CE 2m`. */
-export function sheetTabName(symbol, interval) {
-  const sym = String(symbol || '').trim();
+/** Always-present letters per instrument slot (`1A`, `1B`, `1C`). */
+export const STATIC_INTERVAL_LETTERS = 3;
+
+/** Column AA on each data tab stores `slot|interval|instrumentId`. */
+export const TAB_IDENTITY_INDEX = 26;
+export const TAB_IDENTITY_CELL = 'AA1';
+
+export function intervalLetter(index) {
+  if (!Number.isInteger(index) || index < 0 || index > 25) return '';
+  return String.fromCharCode(65 + index);
+}
+
+/**
+ * Static tab title: Instrument1’s first timeframe → `1A`, second → `1B`, etc.
+ * `intervalIndex` is 0-based (`0` → A).
+ */
+export function sheetTabName(slot, intervalIndex) {
+  const n = Number(slot);
+  const letter = intervalLetter(intervalIndex);
+  if (!Number.isInteger(n) || n < 1 || !letter) return '';
+  return sanitizeTabName(`${n}${letter}`);
+}
+
+export function sheetTabNamesFor(instrument, minLetters = STATIC_INTERVAL_LETTERS) {
+  const nIvs = Array.isArray(instrument?.intervals) ? instrument.intervals.length : 0;
+  const count = Math.max(minLetters, nIvs);
+  const out = [];
+  for (let i = 0; i < count; i += 1) {
+    const name = sheetTabName(instrument?.slot, i);
+    if (name) out.push(name);
+  }
+  return out;
+}
+
+export function allStaticTabNames(slotCount, letterCount = STATIC_INTERVAL_LETTERS) {
+  const out = [];
+  for (let slot = 1; slot <= slotCount; slot += 1) {
+    for (let i = 0; i < letterCount; i += 1) out.push(sheetTabName(slot, i));
+  }
+  return out;
+}
+
+export function tabIdentity(slot, interval, instrumentId) {
   const iv = String(interval || '').trim();
-  if (sym && iv) return sanitizeTabName(`${sym} ${iv}`);
-  return sanitizeTabName(sym || iv);
+  if (!iv) return '';
+  return `${slot}|${iv}|${instrumentId || ''}`;
+}
+
+export function identityFromHeader(header) {
+  return String(header?.[TAB_IDENTITY_INDEX] ?? '').trim();
+}
+
+/** Header cells used for schema checks, ignoring the AA identity cell. */
+export function headerWithoutIdentity(header) {
+  const copy = Array.isArray(header) ? header.slice() : [];
+  if (copy.length > TAB_IDENTITY_INDEX) copy.splice(TAB_IDENTITY_INDEX, 1);
+  while (copy.length && String(copy[copy.length - 1] ?? '') === '') copy.pop();
+  return copy;
 }
 
 export function sanitizeTabName(name) {
@@ -192,9 +244,10 @@ export function isLegacyVwapHeader(header, columns) {
 }
 
 export function shouldRewriteHeader(header, columns) {
-  if (!Array.isArray(header) || !header.length) return true;
-  if (headersMatch(header, columns)) return false;
-  return isPrefixHeader(header, columns) || isLegacyVwapHeader(header, columns);
+  const data = headerWithoutIdentity(header);
+  if (!Array.isArray(data) || !data.length) return true;
+  if (headersMatch(data, columns)) return false;
+  return isPrefixHeader(data, columns) || isLegacyVwapHeader(data, columns);
 }
 
 /** IST calendar date (`YYYY-MM-DD`) from a sheet `candle_time` value. */

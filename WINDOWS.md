@@ -54,8 +54,10 @@ The candle that is still forming is **not** written. After a bar ends, the
 process waits about 2 seconds, then appends the row. Restarts skip times
 already on that tab, so starting twice does not duplicate rows.
 
-Each instrument gets one tab per configured timeframe, named from the
-**symbol only**, for example `NIFTY-I 2m`, `NIFTY-I 5m`.
+Each instrument writes to **static** tabs named from the config slot:
+`Instrument1` → `1A`, `1B`, `1C`; `Instrument2` → `2A`, `2B`, `2C`; and so on.
+Those names stay the same if you change the symbol or timeframe, so VLOOKUP
+formulas keep working. The scraper overwrites the data inside the tab.
 
 ---
 
@@ -240,7 +242,7 @@ Allow it for this folder.
 ## 6. First successful run (smoke test)
 
 Do this once, any time you have internet. It reads `config`, logs in,
-creates any missing `{symbol} {interval}` tabs, writes already-closed candles
+creates any missing `1A` / `1B` / `1C` tabs, writes already-closed candles
 for the current (or last weekday) session, then **exits**.
 
 Double-click **`start-once.bat`**, or in a terminal:
@@ -357,10 +359,10 @@ Edit the `config` tab on the Google Sheet. You do **not** restart the
 scraper.
 
 - Change `Instrument1` / `Instrument2` / `Instrument3` (symbol or timeframes)
-  → within about 5 seconds the process switches symbols / intervals, creates
-  new tabs if needed, and backfills the new symbol (or newly added
-  timeframes) for the current (or last weekday) session. Old symbol tabs are
-  **left in place**.
+  → within about 5 seconds the process switches symbols / intervals,
+  **overwrites the data** in that slot’s static tabs (`1A`, `1B`, `1C` for
+  Instrument1, and so on), and backfills today. Tab names do not change, and
+  sheets are never deleted.
 - Change email/password → the new login is tried first. A bad password is
   logged; the previous working session is kept.
 
@@ -374,7 +376,7 @@ the handover unless the spreadsheet or service account is replaced.
 | Check | Healthy sign |
 | --- | --- |
 | Scraper window | New `INFO sample N …` lines about every 15 seconds during market hours |
-| Google Sheet | New rows on `{symbol} {interval}` tabs after each bar closes |
+| Google Sheet | New rows on `1A` / `1B` / `1C` (and `2A` …) after each bar closes |
 | `logs\status.json` | `"ws": "open"` during the session; `instruments` matches `config` |
 | `logs\error.log` | Empty, or only old errors you already fixed |
 

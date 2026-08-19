@@ -7,6 +7,7 @@ import {
   isUsableConfig,
   reconcileInstruments,
 } from './instruments.js';
+import { sheetTabName } from './columns.js';
 import { earliestOpenMs, workForInstrument } from './market.js';
 import { formatIst, istDateString, sessionDatesFor } from './session.js';
 import { sampleInstruments } from './collect.js';
@@ -98,8 +99,10 @@ export class Supervisor {
       updatedAt: new Date(this.now()).toISOString(),
       email: this.liveConfig?.email || '',
       instruments: this.liveInstruments.map((i) => ({
+        slot: i.slot,
         id: i.id,
         intervals: instrumentIntervals(i),
+        tabs: instrumentIntervals(i).map((_, idx) => sheetTabName(i.slot, idx)),
       })),
       lastConfigAt: this.lastConfigAt,
       lastSampleAt: this.lastSampleAt,
@@ -184,7 +187,7 @@ export class Supervisor {
     const due = [];
     for (const inst of this.liveInstruments) {
       if (!instrumentIntervals(inst).length) continue;
-      const state = this.instrumentState.get(inst.id) || {};
+      const state = this.instrumentState.get(this.#stateKey(inst)) || {};
       const work = workForInstrument(inst, nowMs, state, extra);
       if (work.action !== 'idle') due.push({ instrument: inst, work, state });
     }
@@ -239,35 +242,47 @@ export class Supervisor {
     return this.liveConfig;
   }
 
+  #stateKey(inst) {
+    return inst?.slot ?? inst?.id;
+  }
+
+  async #startSlot(inst) {
+    await this.sink.ensureInstrument(inst);
+    this.instrumentState.set(this.#stateKey(inst), { backfilledSessionDate: null, retainedDate: null });
+    this.nextSampleAt = 0;
+    this.#wakeSampleLoop();
+  }
+
   async reconcile(instruments) {
-    const prevById = new Map(this.liveInstruments.map((i) => [i.id, i]));
-    const { added, removed, updated } = reconcileInstruments(this.liveInstruments, instruments);
+    await this.sink.ensureStaticTabs?.();
+    const nextIds = new Set((instruments || []).map((i) => i.id));
+    const { added, removed, replaced, updated } = reconcileInstruments(this.liveInstruments, instruments);
     for (const inst of removed) {
-      this.log.info('stop monitoring', inst.id);
-      this.sink.dropInstrument(inst.symbol, instrumentIntervals(inst));
-      this.instrumentState.delete(inst.id);
-      this.client?.dropSymbol(inst.id);
+      this.log.info('stop monitoring', `slot ${inst.slot}`, inst.id);
+      this.sink.dropInstrument(inst);
+      this.instrumentState.delete(this.#stateKey(inst));
+      if (!nextIds.has(inst.id)) this.client?.dropSymbol(inst.id);
+    }
+    for (const { from, to } of replaced) {
+      this.log.info('replace slot', to.slot, `${from.id} -> ${to.id}`);
+      this.sink.dropInstrument(from);
+      this.instrumentState.delete(this.#stateKey(from));
+      if (!nextIds.has(from.id)) this.client?.dropSymbol(from.id);
+      await this.#startSlot(to);
     }
     for (const inst of added) {
       const ivs = instrumentIntervals(inst);
-      this.log.info('start monitoring', inst.id, ivs.join(', '));
-      await this.sink.ensureInstrument(inst.symbol, ivs);
-      this.instrumentState.set(inst.id, { backfilledSessionDate: null, retainedDate: null });
-      this.nextSampleAt = 0;
-      this.#wakeSampleLoop();
+      this.log.info('start monitoring', `slot ${inst.slot}`, inst.id, ivs.join(', '));
+      await this.#startSlot(inst);
     }
     for (const inst of updated) {
-      const prev = prevById.get(inst.id);
-      const nextIvs = instrumentIntervals(inst);
-      const prevIvs = instrumentIntervals(prev);
-      const droppedIvs = prevIvs.filter((iv) => !nextIvs.includes(iv));
-      this.log.info('update intervals', inst.id, nextIvs.join(', ') || '(none)');
-      if (droppedIvs.length) this.sink.dropInstrument(inst.symbol, droppedIvs);
-      await this.sink.ensureInstrument(inst.symbol, nextIvs);
-      const state = this.instrumentState.get(inst.id) || {};
+      this.log.info('update intervals', `slot ${inst.slot}`, inst.id, instrumentIntervals(inst).join(', ') || '(none)');
+      this.sink.dropInstrument(inst);
+      await this.sink.ensureInstrument(inst);
+      const state = this.instrumentState.get(this.#stateKey(inst)) || {};
       state.backfilledSessionDate = null;
       state.retainedDate = null;
-      this.instrumentState.set(inst.id, state);
+      this.instrumentState.set(this.#stateKey(inst), state);
       this.nextSampleAt = 0;
       this.#wakeSampleLoop();
     }
@@ -283,12 +298,12 @@ export class Supervisor {
     const today = istDateString(new Date(this.now()));
     let dropped = 0;
     for (const inst of this.liveInstruments) {
-      const state = this.instrumentState.get(inst.id) || {};
+      const state = this.instrumentState.get(this.#stateKey(inst)) || {};
       if (state.retainedDate === today) continue;
-      const n = await this.sink.retainSession(inst.symbol, instrumentIntervals(inst), today);
+      const n = await this.sink.retainSession(inst, today);
       if (n > 0) this.log.info(`removed ${n} previous-day row(s) for ${inst.id}`);
       state.retainedDate = today;
-      this.instrumentState.set(inst.id, state);
+      this.instrumentState.set(this.#stateKey(inst), state);
       dropped += n;
     }
     return dropped;
@@ -339,9 +354,9 @@ export class Supervisor {
       }
 
       for (const d of due) {
-        const state = this.instrumentState.get(d.instrument.id) || {};
+        const state = this.instrumentState.get(this.#stateKey(d.instrument)) || {};
         state.backfilledSessionDate = d.work.persistDate;
-        this.instrumentState.set(d.instrument.id, state);
+        this.instrumentState.set(this.#stateKey(d.instrument), state);
       }
       this.lastSampleAt = sampled_at_utc;
       this.lastError = null;
