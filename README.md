@@ -1,8 +1,9 @@
 # go-charting-scraper
 
-24×7 service that reads GoCharting credentials and instruments from a Google
-Sheet, scrapes **closed** 2m / 3m / 5m footprint candles, and writes them back
-into that same spreadsheet. The process is meant to run unattended on a VPS.
+24×7 service that reads GoCharting credentials, instruments, and candle
+timeframes from a Google Sheet, scrapes **closed** footprint candles, and
+writes them back into that same spreadsheet. The process is meant to run
+unattended on a VPS.
 
 Handing this to a client on a **Windows laptop** that is powered on each
 morning (not left on 24×7): [`WINDOWS.md`](WINDOWS.md).
@@ -18,33 +19,37 @@ WebSocket + Protobuf protocol documented in
 2. Authenticates with the email/password from that tab and keeps the JWT in
    process memory only (refresh before expiry; never written to disk).
 3. Tracks up to six instruments (`Instrument1`–`Instrument6`) in
-   `EXCHANGE:CATEGORY:SYMBOL` form (`NSE`, `BSE`, or `MCX`).
-4. For each instrument, writes **closed** 2m / 3m / 5m candles to tabs named
-   `{symbol} 2m`, `{symbol} 3m`, `{symbol} 5m` — for example
-   `NIFTY2681824300CE 2m`. Forming bars are never written. Each tab keeps
-   **only the current IST day’s rows**; previous-day candles are deleted in
-   the morning.
-5. If an instrument changes from X to Y, monitoring switches to Y and new tabs
-   are created. X’s tabs are left in place. Y is backfilled for **today’s**
-   session only (not previous weekdays).
+   `EXCHANGE:CATEGORY:SYMBOL` form (`NSE`, `BSE`, or `MCX`). Candle timeframes
+   are read from that row’s cells to the right of the symbol (columns C, D, E,
+   …). There is no default list: if a row has a symbol but no timeframes, that
+   instrument is skipped. If only `5m` and `10m` are listed, only those bars
+   are requested.
+4. For each configured timeframe, writes **closed** candles to a tab named
+   `{symbol} {interval}` — for example `NIFTY2681824300CE 2m`. Forming bars are
+   never written. Each tab keeps **only the current IST day’s rows**;
+   previous-day candles are deleted in the morning.
+5. If an instrument changes from X to Y, or its timeframes change, monitoring
+   switches and new tabs are created. Old tabs are left in place. Y is
+   backfilled for **today’s** session only (not previous weekdays).
 6. Stays running overnight and on weekends. NSE/BSE are sampled 09:15–15:40
    IST; MCX energy-style contracts 09:00–23:30 IST (23:55 while US Eastern is
    on daylight saving). Outside those windows the websocket is closed.
 
 ## Config sheet
 
-Create a tab named `config` with labels in column A and values in column B:
+Create a tab named `config` with labels in column A, the login / instrument
+id in column B, and candle timeframes in columns C onward:
 
-| A | B |
-| --- | --- |
-| email | GoCharting login |
-| password | GoCharting password |
-| Instrument1 | `NSE:FUTURE:NIFTY-I` |
-| Instrument2 | `MCX:FUTURE:CRUDEOIL-I` |
-| Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` |
-| Instrument4 | *(optional)* |
-| Instrument5 | *(optional)* |
-| Instrument6 | *(optional)* |
+| A | B | C | D | E |
+| --- | --- | --- | --- | --- |
+| email | GoCharting login | | | |
+| password | GoCharting password | | | |
+| Instrument1 | `NSE:FUTURE:NIFTY-I` | `2m` | `3m` | `5m` |
+| Instrument2 | `MCX:FUTURE:CRUDEOIL-I` | `5m` | `10m` | |
+| Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` | `2m` | `3m` | `5m` |
+| Instrument4 | *(optional)* | | | |
+| Instrument5 | *(optional)* | | | |
+| Instrument6 | *(optional)* | | | |
 
 Share the spreadsheet with the service-account email as **Editor**. The
 password is stored in the sheet in plaintext — share the file only with people
@@ -52,7 +57,7 @@ who should have that login, plus the service account.
 
 ## Candle columns
 
-Each `{symbol} 2m` / `3m` / `5m` tab uses this schema:
+Each `{symbol} {interval}` tab uses this schema:
 
 | Column | Meaning |
 | --- | --- |

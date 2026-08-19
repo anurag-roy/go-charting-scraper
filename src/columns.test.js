@@ -12,7 +12,7 @@ import {
   selectNewCsvRows,
   shouldRewriteHeader,
 } from './columns.js';
-import { SheetsSink, sheetA1 } from './sheets.js';
+import { ConfigSheet, SheetsSink, sheetA1 } from './sheets.js';
 import { closedRowsForInterval } from './collect.js';
 
 describe('sheet helpers', () => {
@@ -256,5 +256,45 @@ describe('closedRowsForInterval', () => {
     assert.deepEqual(rowToSheetValues(rows[0]).slice(0, 5), [
       '2026-08-17T09:15:00', 1, 2, 1, 2,
     ]);
+  });
+});
+
+describe('ConfigSheet', () => {
+  it('reads timeframe columns C onward from the config tab', async () => {
+    const ranges = [];
+    const sheet = new ConfigSheet({
+      spreadsheetId: 'sheet',
+      tab: 'config',
+      sheetsApi: {
+        spreadsheets: {
+          values: {
+            get: async (req) => {
+              ranges.push(req.range);
+              return {
+                data: {
+                  values: [
+                    ['email', 'trader@example.com'],
+                    ['password', 'secret'],
+                    ['Instrument1', 'NSE:FUTURE:NIFTY-I', '2m', '3m', '5m'],
+                    ['Instrument2', 'NSE:OPTIONS:NIFTY2681824100CE', '5m', '10m'],
+                    ['Instrument3', 'NSE:OPTIONS:NIFTY2681824300CE'],
+                  ],
+                },
+              };
+            },
+          },
+        },
+      },
+    });
+    const cfg = await sheet.read();
+    assert.equal(ranges[0], sheetA1('config', 'A1:Z100'));
+    assert.deepEqual(
+      cfg.instruments.map((i) => ({ id: i.id, intervals: i.intervals })),
+      [
+        { id: 'NSE:FUTURE:NIFTY-I', intervals: ['2m', '3m', '5m'] },
+        { id: 'NSE:OPTIONS:NIFTY2681824100CE', intervals: ['5m', '10m'] },
+      ],
+    );
+    assert.equal(cfg.warnings.length, 1);
   });
 });

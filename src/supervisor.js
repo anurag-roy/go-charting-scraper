@@ -1,6 +1,12 @@
 import fs from 'node:fs';
 import WebSocket from 'ws';
-import { configFingerprint, configSummary, isUsableConfig, reconcileInstruments } from './instruments.js';
+import {
+  configFingerprint,
+  configSummary,
+  instrumentIntervals,
+  isUsableConfig,
+  reconcileInstruments,
+} from './instruments.js';
 import { earliestOpenMs, workForInstrument } from './market.js';
 import { formatIst, istDateString, sessionDatesFor } from './session.js';
 import { sampleInstruments } from './collect.js';
@@ -91,7 +97,10 @@ export class Supervisor {
     const payload = {
       updatedAt: new Date(this.now()).toISOString(),
       email: this.liveConfig?.email || '',
-      instruments: this.liveInstruments.map((i) => i.id),
+      instruments: this.liveInstruments.map((i) => ({
+        id: i.id,
+        intervals: instrumentIntervals(i),
+      })),
       lastConfigAt: this.lastConfigAt,
       lastSampleAt: this.lastSampleAt,
       lastError: this.lastError,
@@ -107,7 +116,6 @@ export class Supervisor {
     this.log.info('starting 24x7 scraper', {
       sheet: this.cfg.sheetId,
       configTab: this.cfg.configTab,
-      intervals: this.cfg.intervals,
       configPollMs: this.cfg.configPollMs,
       sampleMs: this.cfg.sampleMs,
     });
@@ -122,7 +130,7 @@ export class Supervisor {
   async runOnce() {
     await this.refreshConfig();
     if (!isUsableConfig(this.liveConfig)) {
-      throw new Error('config sheet is missing email, password, or instruments');
+      throw new Error('config sheet is missing email, password, or instruments with candle timeframes');
     }
     await this.sampleDue(true);
     await this.#shutdown();
@@ -175,6 +183,7 @@ export class Supervisor {
     };
     const due = [];
     for (const inst of this.liveInstruments) {
+      if (!instrumentIntervals(inst).length) continue;
       const state = this.instrumentState.get(inst.id) || {};
       const work = workForInstrument(inst, nowMs, state, extra);
       if (work.action !== 'idle') due.push({ instrument: inst, work, state });
@@ -185,17 +194,18 @@ export class Supervisor {
   async refreshConfig() {
     const parsed = await this.configSheet.read();
     for (const err of parsed.errors || []) this.log.error(err);
+    for (const warn of parsed.warnings || []) this.log.warn(warn);
     if (!parsed.email || !parsed.password) {
       if (!this.liveConfig) this.log.warn('config sheet is missing email/password');
       else this.log.warn('config sheet missing email/password; keeping last good credentials');
-      if (this.liveConfig && parsed.instruments.length) {
+      if (this.liveConfig && parsed.instruments?.length) {
         await this.#withLock(() => this.reconcile(parsed.instruments));
       }
       this.lastConfigAt = new Date().toISOString();
       this.#status();
       return this.liveConfig;
     }
-    if (!parsed.instruments.length && parsed.errors?.length) {
+    if (!parsed.instruments?.length && parsed.errors?.length) {
       this.log.warn('no valid instruments in config; keeping last good list');
       this.lastConfigAt = new Date().toISOString();
       this.#status();
@@ -230,17 +240,34 @@ export class Supervisor {
   }
 
   async reconcile(instruments) {
-    const { added, removed } = reconcileInstruments(this.liveInstruments, instruments);
+    const prevById = new Map(this.liveInstruments.map((i) => [i.id, i]));
+    const { added, removed, updated } = reconcileInstruments(this.liveInstruments, instruments);
     for (const inst of removed) {
       this.log.info('stop monitoring', inst.id);
-      this.sink.dropInstrument(inst.symbol, this.cfg.intervals);
+      this.sink.dropInstrument(inst.symbol, instrumentIntervals(inst));
       this.instrumentState.delete(inst.id);
       this.client?.dropSymbol(inst.id);
     }
     for (const inst of added) {
-      this.log.info('start monitoring', inst.id);
-      await this.sink.ensureInstrument(inst.symbol, this.cfg.intervals);
+      const ivs = instrumentIntervals(inst);
+      this.log.info('start monitoring', inst.id, ivs.join(', '));
+      await this.sink.ensureInstrument(inst.symbol, ivs);
       this.instrumentState.set(inst.id, { backfilledSessionDate: null, retainedDate: null });
+      this.nextSampleAt = 0;
+      this.#wakeSampleLoop();
+    }
+    for (const inst of updated) {
+      const prev = prevById.get(inst.id);
+      const nextIvs = instrumentIntervals(inst);
+      const prevIvs = instrumentIntervals(prev);
+      const droppedIvs = prevIvs.filter((iv) => !nextIvs.includes(iv));
+      this.log.info('update intervals', inst.id, nextIvs.join(', ') || '(none)');
+      if (droppedIvs.length) this.sink.dropInstrument(inst.symbol, droppedIvs);
+      await this.sink.ensureInstrument(inst.symbol, nextIvs);
+      const state = this.instrumentState.get(inst.id) || {};
+      state.backfilledSessionDate = null;
+      state.retainedDate = null;
+      this.instrumentState.set(inst.id, state);
       this.nextSampleAt = 0;
       this.#wakeSampleLoop();
     }
@@ -258,7 +285,7 @@ export class Supervisor {
     for (const inst of this.liveInstruments) {
       const state = this.instrumentState.get(inst.id) || {};
       if (state.retainedDate === today) continue;
-      const n = await this.sink.retainSession(inst.symbol, this.cfg.intervals, today);
+      const n = await this.sink.retainSession(inst.symbol, instrumentIntervals(inst), today);
       if (n > 0) this.log.info(`removed ${n} previous-day row(s) for ${inst.id}`);
       state.retainedDate = today;
       this.instrumentState.set(inst.id, state);
@@ -290,7 +317,6 @@ export class Supervisor {
       const { rows, summaries } = await sampleInstruments({
         client: this.client,
         instruments: due.map((d) => d.instrument),
-        intervals: this.cfg.intervals,
         sessionDatesFor,
         sessionOptsFor: (inst) => due.find((d) => d.instrument.id === inst.id)?.work.hours,
         nowMs,

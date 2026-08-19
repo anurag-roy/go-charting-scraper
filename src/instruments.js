@@ -34,40 +34,111 @@ export function parseInstrumentId(raw) {
   return { exchange, segment, symbol, id: `${exchange}:${segment}:${symbol}` };
 }
 
+/** GoCharting minute interval, e.g. `2m`, `10m`. Empty string if the cell is blank. */
+export function parseIntervalToken(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const m = s.match(/^(\d+)\s*m(?:in(?:ute)?s?)?$/i) || s.match(/^(\d+)$/);
+  if (!m) {
+    throw new Error(`unsupported interval "${raw}" (use minute bars such as 2m, 5m, 10m)`);
+  }
+  const n = Number(m[1]);
+  if (!Number.isInteger(n) || n < 1 || n > 1440) {
+    throw new Error(`unsupported interval "${raw}" (use 1m–1440m)`);
+  }
+  return `${n}m`;
+}
+
+/**
+ * Timeframe cells from a config row (columns C onward). Blank cells are ignored.
+ * There is no default list — an empty result means generate nothing.
+ */
+export function parseIntervalCells(cells) {
+  const intervals = [];
+  const seen = new Set();
+  const errors = [];
+  for (const cell of cells || []) {
+    const parts = String(cell ?? '').split(/[,;]+/);
+    for (const part of parts) {
+      try {
+        const iv = parseIntervalToken(part);
+        if (!iv || seen.has(iv)) continue;
+        seen.add(iv);
+        intervals.push(iv);
+      } catch (err) {
+        errors.push(err.message || String(err));
+      }
+    }
+  }
+  return { intervals, errors };
+}
+
+export function instrumentIntervals(instrument) {
+  return Array.isArray(instrument?.intervals)
+    ? instrument.intervals.map((iv) => String(iv || '').trim()).filter(Boolean)
+    : [];
+}
+
+export function sameIntervals(a, b) {
+  const x = instrumentIntervals({ intervals: a });
+  const y = instrumentIntervals({ intervals: b });
+  return x.length === y.length && x.every((iv, i) => iv === y[i]);
+}
+
+function cellValue(row, index) {
+  if (!row || row[index] == null) return '';
+  return String(row[index]);
+}
+
 export function parseConfigRows(rows) {
   const map = new Map();
   for (const row of rows || []) {
     if (!row || row[0] == null || String(row[0]).trim() === '') continue;
-    map.set(normalizeConfigKey(row[0]), row[1] == null ? '' : String(row[1]));
+    map.set(normalizeConfigKey(row[0]), {
+      value: cellValue(row, 1),
+      extra: Array.isArray(row) ? row.slice(2) : [],
+    });
   }
 
-  const email = String(map.get('email') || '').trim();
-  const password = String(map.get('password') ?? '');
+  const email = String(map.get('email')?.value || '').trim();
+  const password = String(map.get('password')?.value ?? '');
   const instruments = [];
   const seen = new Set();
   const errors = [];
+  const warnings = [];
 
-  for (const key of instrumentConfigKeys()) {
-    const raw = String(map.get(key) || '').trim();
-    if (!raw) continue;
+  instrumentConfigKeys().forEach((key, idx) => {
+    const slot = `Instrument${idx + 1}`;
+    const entry = map.get(key);
+    const raw = String(entry?.value || '').trim();
+    if (!raw) return;
     try {
       const inst = parseInstrumentId(raw);
-      if (seen.has(inst.id)) continue;
+      const parsed = parseIntervalCells(entry?.extra || []);
+      for (const err of parsed.errors) errors.push(`${slot}: ${err}`);
+      if (!parsed.intervals.length) {
+        warnings.push(`${slot} (${inst.id}) has no candle timeframes; skipping`);
+        return;
+      }
+      if (seen.has(inst.id)) return;
       seen.add(inst.id);
-      instruments.push(inst);
+      instruments.push({ ...inst, intervals: parsed.intervals });
     } catch (err) {
       errors.push(err.message || String(err));
     }
-  }
+  });
 
-  return { email, password, instruments, errors };
+  return { email, password, instruments, errors, warnings };
 }
 
 export function configFingerprint(cfg) {
   return JSON.stringify({
     email: cfg?.email || '',
     password: cfg?.password || '',
-    instruments: (cfg?.instruments || []).map((i) => i.id),
+    instruments: (cfg?.instruments || []).map((i) => ({
+      id: i.id,
+      intervals: instrumentIntervals(i),
+    })),
   });
 }
 
@@ -75,7 +146,10 @@ export function configSummary(cfg) {
   return {
     email: cfg?.email || '',
     passwordSet: Boolean(cfg?.password),
-    instruments: (cfg?.instruments || []).map((i) => i.id),
+    instruments: (cfg?.instruments || []).map((i) => ({
+      id: i.id,
+      intervals: instrumentIntervals(i),
+    })),
   };
 }
 
@@ -84,13 +158,20 @@ export function reconcileInstruments(prev, next) {
   const nextList = next || [];
   const prevIds = new Set(prevList.map((i) => i.id));
   const nextIds = new Set(nextList.map((i) => i.id));
+  const prevById = new Map(prevList.map((i) => [i.id, i]));
+  const kept = nextList.filter((i) => prevIds.has(i.id));
   return {
     added: nextList.filter((i) => !prevIds.has(i.id)),
     removed: prevList.filter((i) => !nextIds.has(i.id)),
-    kept: nextList.filter((i) => prevIds.has(i.id)),
+    kept,
+    updated: kept.filter((i) => !sameIntervals(prevById.get(i.id)?.intervals, i.intervals)),
   };
 }
 
 export function isUsableConfig(cfg) {
-  return Boolean(cfg?.email && cfg?.password && cfg.instruments?.length);
+  return Boolean(
+    cfg?.email
+    && cfg?.password
+    && cfg.instruments?.some((i) => instrumentIntervals(i).length),
+  );
 }

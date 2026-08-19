@@ -23,7 +23,6 @@ describe('validateConfig', () => {
       googleCredentialsJson: null,
       googleClientEmail: '',
       googlePrivateKey: '',
-      intervals: ['2m'],
       configPollMs: 5000,
       sampleMs: 15000,
     });

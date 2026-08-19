@@ -1,4 +1,4 @@
-import { symbolId } from './instruments.js';
+import { instrumentIntervals, symbolId } from './instruments.js';
 import { footprintMetrics, oiFields, vwapByCandleTime } from './metrics.js';
 import { isCandleClosed, isPersistableCandle, inSession } from './session.js';
 import { dedupeOhlcBars, findOhlcBar } from './gocharting.js';
@@ -95,7 +95,6 @@ export function closedRowsForInterval({
 export async function sampleInstruments({
   client,
   instruments,
-  intervals,
   sessionDatesFor,
   sessionOptsFor,
   nowMs,
@@ -106,9 +105,11 @@ export async function sampleInstruments({
   const rows = [];
   const summaries = [];
   await Promise.all((instruments || []).map(async (instrument) => {
+    const ivs = instrumentIntervals(instrument);
+    if (!ivs.length) return;
     const sessionOpts = sessionOptsFor(instrument, nowMs);
     const dates = sessionDatesFor(nowMs, sessionOpts);
-    const results = await Promise.all((intervals || []).map(async (iv) => {
+    const results = await Promise.all(ivs.map(async (iv) => {
       const [fp, ohlc] = await Promise.all([
         client.requestInterval(instrument, iv, dates),
         client.requestOhlc(instrument, iv),

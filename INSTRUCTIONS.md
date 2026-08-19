@@ -1,9 +1,9 @@
 # GoCharting scraper — setup and VPS deploy
 
 This is the end-to-end guide for running the **24×7 Google Sheet service**.
-The process lives on your VPS, reads GoCharting credentials and instruments
-from a spreadsheet `config` tab, and writes **closed** 2m / 3m / 5m candles
-back into that same spreadsheet.
+The process lives on your VPS, reads GoCharting credentials, instruments, and
+candle timeframes from a spreadsheet `config` tab, and writes **closed**
+candles back into that same spreadsheet.
 
 Running on the **client’s Windows laptop** instead (powered on each morning,
 not a VPS): [`WINDOWS.md`](WINDOWS.md).
@@ -48,7 +48,7 @@ Production entrypoint: `src/index.js` (`npm start`).
 
 It signs in to GoCharting with AWS Cognito over HTTPS (**no browser**), opens
 the market-data WebSocket, and for each configured instrument persists every
-**closed** `2m`, `3m`, and `5m` footprint candle:
+**closed** footprint candle for the timeframes listed on that `config` row:
 
 | Sheet column | Meaning |
 | --- | --- |
@@ -96,7 +96,7 @@ You do not need this to operate it. It explains outbound hosts and secrets.
    `investigation/evidence/footprint.proto` and
    `investigation/evidence/ohlc_bars.proto`.
 7. Closed candles in that exchange’s session window are appended to tabs
-   named `{symbol} 2m`, `{symbol} 3m`, `{symbol} 5m`.
+   named `{symbol} {interval}` (for example `NIFTY-I 5m`).
 
 There is **no REST/JSON endpoint** for these numbers. Do not scrape the DOM.
 A headless browser is unnecessary: login is a single Cognito HTTP call.
@@ -149,24 +149,30 @@ scraper.
 ## 4. Google Sheet (`config` tab)
 
 Create (or reuse) a spreadsheet. Add a tab named exactly **`config`**.
-Put labels in column A and values in column B (order does not matter; keys
-are case-insensitive):
+Put labels in column A, the login / instrument id in column B, and candle
+timeframes in columns C onward (order of rows does not matter; keys are
+case-insensitive):
 
-| A | B (example) |
-| --- | --- |
-| email | GoCharting login email |
-| password | GoCharting password |
-| Instrument1 | `NSE:FUTURE:NIFTY-I` |
-| Instrument2 | `MCX:FUTURE:CRUDEOIL-I` |
-| Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` |
-| Instrument4 | *(optional)* |
-| Instrument5 | *(optional)* |
-| Instrument6 | *(optional)* |
+| A | B (example) | C | D | E |
+| --- | --- | --- | --- | --- |
+| email | GoCharting login email | | | |
+| password | GoCharting password | | | |
+| Instrument1 | `NSE:FUTURE:NIFTY-I` | `2m` | `3m` | `5m` |
+| Instrument2 | `MCX:FUTURE:CRUDEOIL-I` | `5m` | `10m` | |
+| Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` | `2m` | `3m` | `5m` |
+| Instrument4 | *(optional)* | | | |
+| Instrument5 | *(optional)* | | | |
+| Instrument6 | *(optional)* | | | |
 
 Instrument strings are `EXCHANGE:CATEGORY:SYMBOL` (`NSE`, `BSE`, or `MCX`).
 Slashes (`NSE/FUTURE/NIFTY-I`) are also accepted. Blank instrument slots are
 ignored. Duplicate instruments are monitored once. At most six instruments
 (`Instrument1`–`Instrument6`) are read; extra slots are ignored.
+
+Timeframes are minute bars such as `2m`, `5m`, `10m`. Each instrument uses
+**only** the timeframes written on its row — there is no default list. If a
+row has a symbol but no timeframes, that instrument is skipped. You can put
+as many timeframes as you need in columns C, D, E, …
 
 The password is **plaintext in the spreadsheet**. Share the file only with
 people who should have that GoCharting login, plus the service account.
@@ -282,7 +288,7 @@ ONCE=1 npm start
 ```
 
 `ONCE=1` means: read `config`, authenticate, create any missing
-`{symbol} 2m/3m/5m` tabs, drop rows that are not from **today’s IST date**,
+`{symbol} {interval}` tabs, drop rows that are not from **today’s IST date**,
 backfill already-closed candles for today’s session (if the market is open
 or already closed today), then exit. Use this as a smoke test before systemd.
 
@@ -290,8 +296,8 @@ or already closed today), then exit. Use this as a smoke test before systemd.
 
 ```text
 INFO go-charting-scraper { once: true, sheet: '…' }
-INFO config applied { email: '…', passwordSet: true, instruments: [ 'NSE:FUTURE:NIFTY-I', … ] }
-INFO start monitoring NSE:FUTURE:NIFTY-I
+INFO config applied { email: '…', passwordSet: true, instruments: [ { id: 'NSE:FUTURE:NIFTY-I', intervals: [ '2m', '3m', '5m' ] }, … ] }
+INFO start monitoring NSE:FUTURE:NIFTY-I 2m, 3m, 5m
 INFO connecting websocket not open
 INFO sample 1 NSE:FUTURE:NIFTY-I/backfill, …
 INFO   NSE:FUTURE:NIFTY-I 2m: closed=193/193
@@ -309,7 +315,7 @@ Checklist:
 | Check | Meaning |
 | --- | --- |
 | `config applied` with `passwordSet: true` | `config` tab parsed |
-| `start monitoring …` | Tabs `{symbol} 2m/3m/5m` ensured |
+| `start monitoring …` | Tabs `{symbol} {interval}` ensured |
 | `closed=` > 0 during/after the session | Closed bars decoded |
 | `wrote N new closed-candle row(s)` | Rows appended to the spreadsheet |
 | Second run writes `0` | Dedup by tab + `candle_time` |
@@ -337,7 +343,6 @@ spreadsheet id are required.
 | `CONFIG_TAB` | `config` | Name of the config worksheet |
 | `CONFIG_POLL_MS` | `5000` | How often to re-read `config` (min 1000) |
 | `SAMPLE_MS` | `15000` | Delay between GoCharting samples while in session |
-| `INTERVALS` | `2m,3m,5m` | GoCharting interval strings |
 | `CLOSE_GRACE_MS` | `2000` | Wait after a bar’s end before treating it as closed |
 | `AFTER_CLOSE_BUFFER_MS` | `60000` | Extra sampling after the session close to catch last bars |
 | `TOKEN_REFRESH_MS` | `2700000` (45 min) | Refresh Cognito JWT / reconnect WebSocket |
@@ -355,14 +360,14 @@ spreadsheet id are required.
 
 ## 10. Candle tabs and columns
 
-Each instrument gets three tabs named from the **symbol only** (no exchange
-or category):
+Each instrument gets one tab per configured timeframe, named from the
+**symbol only** (no exchange or category) plus the interval:
 
-| Instrument on `config` | Tabs |
-| --- | --- |
-| `NSE:FUTURE:NIFTY-I` | `NIFTY-I 2m`, `NIFTY-I 3m`, `NIFTY-I 5m` |
-| `MCX:FUTURE:CRUDEOIL-I` | `CRUDEOIL-I 2m`, … |
-| `NSE:OPTIONS:NIFTY2681824300CE` | `NIFTY2681824300CE 2m`, … |
+| Instrument on `config` | Example timeframes | Tabs |
+| --- | --- | --- |
+| `NSE:FUTURE:NIFTY-I` | `2m`, `3m`, `5m` | `NIFTY-I 2m`, `NIFTY-I 3m`, `NIFTY-I 5m` |
+| `MCX:FUTURE:CRUDEOIL-I` | `5m`, `10m` | `CRUDEOIL-I 5m`, `CRUDEOIL-I 10m` |
+| `NSE:OPTIONS:NIFTY2681824300CE` | `15m` | `NIFTY2681824300CE 15m` |
 
 The `config` tab is never renamed. Missing data tabs are created on first
 monitor. Existing `candle_time` values are not duplicated. Each data tab
@@ -411,16 +416,17 @@ Empty `closed=0` on a holiday is expected.
 
 ## 12. Changing instruments
 
-Edit `Instrument1` … `Instrument6` on the `config` tab. Within
-about 5 seconds the process:
+Edit `Instrument1` … `Instrument6` on the `config` tab, including the
+timeframe cells on each row. Within about 5 seconds the process:
 
-1. Stops requesting the old symbol (X).
-2. Creates `{Y} 2m`, `{Y} 3m`, `{Y} 5m` if they do not exist.
-3. Backfills Y for **today’s** session (if today is a trading day).
+1. Stops requesting the old symbol (X), or old timeframes if only those changed.
+2. Creates `{Y} {interval}` tabs for each listed timeframe if they do not exist.
+3. Backfills Y (or the newly added timeframes) for **today’s** session (if today is a trading day).
 4. Starts live monitoring of Y.
 
-**X’s tabs are not deleted.** Historical rows on X stay until the next IST
-date change, when every data tab is reduced to the current day only.
+**X’s tabs are not deleted**, and tabs for timeframes you remove from a row
+are left in place. Historical rows stay until the next IST date change, when
+every data tab is reduced to the current day only.
 
 If the email/password cells change, the new login is attempted first. A bad
 password is logged and the previous Cognito session is kept.
@@ -545,10 +551,10 @@ covers that).
 
 - It does **not** open a browser or drive the GoCharting UI.
 - It does **not** change profile, chart, or indicator settings.
-- 2m / 3m / 5m are requested as `FOOTPRINT/V2` and `TS/V2` `OHLCV/V2`.
+- Configured timeframes are requested as `FOOTPRINT/V2` and `TS/V2` `OHLCV/V2`.
 - It does **not** write the forming candle; only closed bars.
 - It does **not** subscribe to the live `trade` tape; it re-fetches footprint
-  snapshots. That is enough for 15s polling of 2m/3m/5m bars.
+  snapshots. That is enough for 15s polling of closed bars.
 - It does **not** delete old symbol tabs when you change an instrument.
 - It **does** delete previous-day candle rows each IST morning so tabs hold
   only the current day.
@@ -562,7 +568,7 @@ covers that).
 | --- | --- | --- |
 | `set GOOGLE_SHEET_ID …` (exit 2) | Env not loaded | Copy `.env.example`. systemd: `EnvironmentFile=` exists and `chmod 600`. |
 | `Google credentials are missing` / file not found | JSON path or PEM wrong | Set `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY`. Share the sheet with the service account as Editor. |
-| `config sheet is missing email, password, or instruments` | Tab name / cells | Tab must be `config`. Labels in A, values in B. |
+| `config sheet is missing email, password, or instruments with candle timeframes` | Tab name / cells | Tab must be `config`. Labels in A, symbol in B, timeframes in C onward. |
 | `unsupported exchange` / `invalid instrument` | Bad `InstrumentN` | Use `NSE\|BSE\|MCX:CATEGORY:SYMBOL`. Check `logs/error.log`. |
 | `cognito auth failed` / `NotAuthorizedException` | Bad sheet password | Confirm the `config` email/password. Cognito does not open a login UI. |
 | `cognito extra challenge` | MFA | Only `USER_PASSWORD_AUTH` with no challenge is supported. |
@@ -597,7 +603,7 @@ ONCE=1 npm start
   and WebSocket. Confirm their terms of use allow it. Typical breakage is
   Cognito client-id drift or WS command schema changes.
 - Be polite with polling. 5s config reads and 15s `FOOTPRINT/V2` snapshots are
-  enough for closed 2m/3m/5m bars.
+  enough for closed bars.
 
 ---
 
@@ -644,7 +650,7 @@ cp .env.example .env
 # edit .env: GOOGLE_SHEET_ID + GOOGLE_SERVICE_ACCOUNT_JSON
 # (or GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY)
 # Share the spreadsheet with the service account as Editor.
-# Fill the config tab: email, password, Instrument1..6.
+# Fill the config tab: email, password, Instrument1..6 plus timeframes in C onward.
 
 ONCE=1 npm start
 ```
