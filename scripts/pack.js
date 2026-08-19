@@ -191,12 +191,11 @@ if (lockSync.status !== 0) {
   throw new Error('failed to sync dist package-lock.json with production dependencies');
 }
 
-for (const name of ['start.bat', 'start-once.bat', '.env.example', 'WINDOWS.md']) {
+for (const name of ['start.bat', 'start-once.bat']) {
   copyFile(path.join(root, name), path.join(staging, name));
 }
 
-copyFile(path.join(root, 'logs', '.gitkeep'), path.join(staging, 'logs', '.gitkeep'));
-copyFile(path.join(root, 'logs', 'README.md'), path.join(staging, 'logs', 'README.md'));
+fs.mkdirSync(path.join(staging, 'logs'), { recursive: true });
 
 const secretCopies = [];
 const envPath = path.join(root, '.env');
@@ -210,34 +209,9 @@ if (fs.existsSync(saPath)) {
   secretCopies.push('google-service-account.json');
 }
 
-fs.writeFileSync(path.join(staging, 'README.md'), `# GoCharting scraper (runnable snapshot)
-
-This zip is a bundled copy of what \`npm start\` runs. It does not include
-git history, tests, or the source tree.
-
-## Setup
-
-1. Unzip to a normal local folder (avoid OneDrive Files On-Demand placeholders).
-2. Install Node.js 22 LTS from https://nodejs.org — leave **Add to PATH** checked.
-3. If \`.env\` is not already in this folder, copy the one you were given next
-   to \`package.json\`. If it points at \`google-service-account.json\`, put
-   that file here too.
-4. Double-click \`start-once.bat\` once to smoke-test, then \`start.bat\` each
-   morning. Leave the window open while you want candles collected.
-
-Or in a terminal from this folder:
-
-\`\`\`
-npm ci --omit=dev
-npm start
-\`\`\`
-
-Laptop details (sleep, gaps, sheet tabs): see \`WINDOWS.md\`.
-`);
-
 const zipName = `${pkg.name}-${pkg.version}.zip`;
 const zipPath = path.join(distDir, zipName);
-const zipFiles = [];
+const zipFiles = [{ name: `${folderName}/logs/`, data: Buffer.alloc(0) }];
 for (const file of walkFiles(staging)) {
   zipFiles.push({ name: `${folderName}/${file.rel}`, data: file.data });
 }
