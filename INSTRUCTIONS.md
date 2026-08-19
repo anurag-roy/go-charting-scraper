@@ -376,7 +376,7 @@ timeframes in F onward become `1D`, `1E`, …
 
 The eighteen tabs `1A`–`6C` are created if missing and **never deleted**.
 Point VLOOKUP / INDEX formulas at those names; they stay stable when you
-change a symbol or timeframe. Column AA on each data tab records which
+change a symbol or timeframe. Column Z on each data tab records which
 instrument and interval currently occupy it (`1|2m|NSE:FUTURE:NIFTY-I`).
 Leave A:M for your formulas.
 

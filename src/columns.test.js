@@ -10,6 +10,8 @@ import {
   sheetTabName,
   allStaticTabNames,
   tabIdentity,
+  TAB_IDENTITY_CELL,
+  TAB_IDENTITY_INDEX,
   csvRowKey,
   selectNewCsvRows,
   shouldRewriteHeader,
@@ -26,6 +28,8 @@ describe('sheet helpers', () => {
     assert.equal(sheetTabName(6, 2), '6C');
     assert.deepEqual(allStaticTabNames(2, 3), ['1A', '1B', '1C', '2A', '2B', '2C']);
     assert.equal(tabIdentity(1, '2m', 'NSE:FUTURE:NIFTY-I'), '1|2m|NSE:FUTURE:NIFTY-I');
+    assert.equal(TAB_IDENTITY_CELL, 'Z1');
+    assert.equal(TAB_IDENTITY_INDEX, 25);
   });
 
   it('strips a trailing timezone offset from candle_time', () => {
@@ -81,7 +85,7 @@ describe('sheet helpers', () => {
 describe('SheetsSink', () => {
   function identityHeader(identity) {
     const header = [...SHEET_COLUMNS];
-    while (header.length < 26) header.push('');
+    while (header.length < 25) header.push('');
     header.push(identity);
     return header;
   }
@@ -258,7 +262,7 @@ describe('SheetsSink', () => {
     });
     assert.equal(calls.clear.length > 0, true);
     assert.equal(
-      calls.update.some((req) => req.range === sheetA1(tab, 'AA1')
+      calls.update.some((req) => req.range === sheetA1(tab, TAB_IDENTITY_CELL)
         && req.requestBody.values[0][0] === '1|5m|NSE:OPTIONS:NIFTY2681824300CE'),
       true,
     );

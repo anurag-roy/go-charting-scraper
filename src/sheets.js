@@ -241,7 +241,7 @@ export class SheetsSink {
     const res = await withRetry(
       () => this.sheetsApi.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: sheetA1(tab, 'A:AA'),
+        range: sheetA1(tab, 'A:Z'),
       }),
       retryOpts(this.log, `read ${tab}`),
     );

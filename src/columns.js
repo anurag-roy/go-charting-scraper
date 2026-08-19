@@ -66,9 +66,12 @@ export function formatSheetCandleTime(iso) {
 /** Always-present letters per instrument slot (`1A`, `1B`, `1C`). */
 export const STATIC_INTERVAL_LETTERS = 3;
 
-/** Column AA on each data tab stores `slot|interval|instrumentId`. */
-export const TAB_IDENTITY_INDEX = 26;
-export const TAB_IDENTITY_CELL = 'AA1';
+/**
+ * Column Z on each data tab stores `slot|interval|instrumentId`.
+ * New Google sheets are 26 columns wide (A–Z); AA is out of range.
+ */
+export const TAB_IDENTITY_INDEX = 25;
+export const TAB_IDENTITY_CELL = 'Z1';
 
 export function intervalLetter(index) {
   if (!Number.isInteger(index) || index < 0 || index > 25) return '';
@@ -115,7 +118,7 @@ export function identityFromHeader(header) {
   return String(header?.[TAB_IDENTITY_INDEX] ?? '').trim();
 }
 
-/** Header cells used for schema checks, ignoring the AA identity cell. */
+/** Header cells used for schema checks, ignoring the Z identity cell. */
 export function headerWithoutIdentity(header) {
   const copy = Array.isArray(header) ? header.slice() : [];
   if (copy.length > TAB_IDENTITY_INDEX) copy.splice(TAB_IDENTITY_INDEX, 1);
