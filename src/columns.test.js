@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   SHEET_COLUMNS,
   formatSheetCandleTime,
-  isLegacyOhlcHeader,
   isLegacyVwapHeader,
   mapSheetRow,
   rowToSheetValues,
@@ -56,28 +55,18 @@ describe('sheet helpers', () => {
     ]);
   });
 
-  it('treats pre-OHLC and vwap1/vwap2 headers as legacy and maps onto the current schema', () => {
-    const preOhlc = [
-      'candle_time', 'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
-      'poc', 'volume', 'oi_change', 'vwap',
-    ];
-    const legacyVwap = [
-      'candle_time', 'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
+  it('treats vwap1/vwap2 headers as legacy and maps vwap1 onto vwap', () => {
+    const legacy = [
+      'candle_time', 'open', 'high', 'low', 'close',
+      'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
       'poc', 'volume', 'oi_change', 'vwap1', 'vwap2',
     ];
-    assert.equal(isLegacyOhlcHeader(preOhlc, SHEET_COLUMNS), true);
-    assert.equal(isLegacyOhlcHeader(legacyVwap, SHEET_COLUMNS), true);
-    assert.equal(isLegacyVwapHeader(legacyVwap, preOhlc), true);
-    assert.equal(shouldRewriteHeader(preOhlc, SHEET_COLUMNS), true);
-    assert.equal(shouldRewriteHeader(legacyVwap, SHEET_COLUMNS), true);
+    assert.equal(isLegacyVwapHeader(legacy, SHEET_COLUMNS), true);
+    assert.equal(shouldRewriteHeader(legacy, SHEET_COLUMNS), true);
     assert.equal(shouldRewriteHeader(SHEET_COLUMNS, SHEET_COLUMNS), false);
     assert.deepEqual(
-      mapSheetRow(legacyVwap, ['2026-08-17T09:15:00+05:30', 1, 2, 3, 4, 5, 6, 7, 80.1, 99]),
-      ['2026-08-17T09:15:00', '', '', '', '', 1, 2, 3, 4, 5, 6, 7, 80.1],
-    );
-    assert.deepEqual(
-      mapSheetRow(preOhlc, ['2026-08-17T09:15:00+05:30', 1, 2, 3, 4, 5, 6, 7, 80.1]),
-      ['2026-08-17T09:15:00', '', '', '', '', 1, 2, 3, 4, 5, 6, 7, 80.1],
+      mapSheetRow(legacy, ['2026-08-17T09:15:00+05:30', 100, 110, 99, 105, 1, 2, 3, 4, 5, 6, 7, 80.1, 99]),
+      ['2026-08-17T09:15:00', 100, 110, 99, 105, 1, 2, 3, 4, 5, 6, 7, 80.1],
     );
     assert.equal(sheetCandleDate('2026-08-17T09:15:00+05:30'), '2026-08-17');
   });
@@ -169,27 +158,33 @@ describe('SheetsSink', () => {
     assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), true);
   });
 
-  it('retainSession clears pre-OHLC rows so the next sample can backfill them', async () => {
+  it('retainSession remaps vwap1 onto vwap while keeping OHLC', async () => {
     const tab = sheetTabName('NIFTY-I', '2m');
     const legacyHeader = [
-      'candle_time', 'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
+      'candle_time', 'open', 'high', 'low', 'close',
+      'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
       'poc', 'volume', 'oi_change', 'vwap1', 'vwap2',
     ];
-    const calls = { update: [], clear: [] };
+    const calls = { get: [], update: [], clear: [], batchUpdate: [] };
+    const titles = new Set([tab]);
     const sink = new SheetsSink({ spreadsheetId: 'sheet' });
     sink.sheetsApi = {
       spreadsheets: {
-        get: async () => ({ data: { sheets: [{ properties: { title: tab } }] } }),
+        get: async () => ({ data: { sheets: [...titles].map((title) => ({ properties: { title } })) } }),
+        batchUpdate: async (req) => { calls.batchUpdate.push(req); return {}; },
         values: {
-          get: async () => ({
-            data: {
-              values: [
-                legacyHeader,
-                ['2026-08-17T09:15:00+05:30', 1, 2, 3, 4, 5, 6, 7, 10.1, 11],
-                ['2026-08-18T09:15:00+05:30', 8, 9, 10, 11, 12, 13, 14, 20.2, 21],
-              ],
-            },
-          }),
+          get: async (req) => {
+            calls.get.push(req);
+            return {
+              data: {
+                values: [
+                  legacyHeader,
+                  ['2026-08-17T09:15:00+05:30', 90, 95, 88, 92, 1, 2, 3, 4, 5, 6, 7, 10.1, 11],
+                  ['2026-08-18T09:15:00+05:30', 100, 110, 99, 105, 8, 9, 10, 11, 12, 13, 14, 20.2, 21],
+                ],
+              },
+            };
+          },
           update: async (req) => { calls.update.push(req); return {}; },
           clear: async (req) => { calls.clear.push(req); return {}; },
         },
@@ -200,42 +195,11 @@ describe('SheetsSink', () => {
     assert.equal(dropped, 1);
     assert.equal(calls.clear.length, 1);
     assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
-    assert.equal(calls.update.length, 1);
+    assert.deepEqual(calls.update[1].requestBody.values[0], [
+      '2026-08-18T09:15:00', 100, 110, 99, 105, 8, 9, 10, 11, 12, 13, 14, 20.2,
+    ]);
     assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
-    assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), false);
-  });
-
-  it('ensureInstrument drops pre-OHLC rows so they are backfilled with open/high/low/close', async () => {
-    const tab = sheetTabName('NIFTY-I', '2m');
-    const oldHeader = [
-      'candle_time', 'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
-      'poc', 'volume', 'oi_change', 'vwap',
-    ];
-    const calls = { update: [], clear: [] };
-    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
-    sink.sheetsApi = {
-      spreadsheets: {
-        get: async () => ({ data: { sheets: [{ properties: { title: tab } }] } }),
-        values: {
-          get: async () => ({
-            data: {
-              values: [
-                oldHeader,
-                ['2026-08-18T09:15:00', 1, 2, 3, 4, 5, 6, 7, 80.1],
-              ],
-            },
-          }),
-          update: async (req) => { calls.update.push(req); return {}; },
-          clear: async (req) => { calls.clear.push(req); return {}; },
-        },
-      },
-    };
-
-    await sink.ensureInstrument('NIFTY-I', ['2m']);
-    assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
-    assert.equal(calls.clear.length, 1);
-    assert.equal(calls.update.length, 1);
-    assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), false);
+    assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), true);
   });
 });
 
