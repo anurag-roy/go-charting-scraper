@@ -1,6 +1,10 @@
 /** Slim schema written to Google Sheets. */
 export const SHEET_COLUMNS = [
   'candle_time',
+  'open',
+  'high',
+  'low',
+  'close',
   'delta',
   'max_delta',
   'max_vol_b',

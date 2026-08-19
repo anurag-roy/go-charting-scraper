@@ -41,14 +41,14 @@ and 5-minute footprint candles back into that same spreadsheet.
 | Sheet column | Meaning |
 | --- | --- |
 | `candle_time` | Candle open time in IST (no `+05:30` suffix) |
+| `open` / `high` / `low` / `close` | Matching OHLC bar (`high`/`low` fall back to footprint if the bar is missing) |
 | `delta` | Buy volume − sell volume |
 | `max_delta` | Intra-bar cumulative-delta high |
 | `max_vol_b` / `max_vol_s` | Largest buy / sell volume at any single price |
 | `poc` | Point of control |
 | `volume` | Footprint candle volume |
 | `oi_change` | This bar’s open interest minus the previous bar’s |
-| `vwap1` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
-| `vwap2` | Per-bar VWAP from footprint price levels |
+| `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
 
 The candle that is still forming is **not** written. After a bar ends, the
 process waits about 2 seconds, then appends the row. Restarts skip times
