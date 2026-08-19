@@ -69,7 +69,7 @@ You should receive these from the person handing the project over. You do
 
 | Item | What it is |
 | --- | --- |
-| Project folder (zip) **or** a git clone of this repo | The scraper code |
+| Project folder (zip from `npm run pack`, **or** a git clone) | The scraper. The zip has `index.js` instead of `src\`. |
 | Google Sheet link | The spreadsheet the scraper reads and writes |
 | `.env` file | Spreadsheet id/URL plus Google API credentials |
 | `google-service-account.json` (if mentioned in `.env`) | Google API key file. Keep it next to `.env` |
@@ -166,6 +166,9 @@ git clone https://github.com/anurag-roy/go-charting-scraper.git
 cd go-charting-scraper
 ```
 
+A pack zip (`npm run pack` on the giver’s machine) already has `index.js`,
+`package.json`, `start.bat`, and proto files. You do not need Git.
+
 ### 5.2 Drop in the secrets you were given
 
 In that folder you should have:
@@ -173,7 +176,9 @@ In that folder you should have:
 ```text
 go-charting-scraper\
   package.json
-  src\
+  src\                          ← git clone only
+  index.js                      ← pack zip only
+  proto\                        ← pack zip only (schemas bundled next to index.js)
   .env                          ← provided; do not share
   google-service-account.json   ← only if your .env points at this file
   start.bat                     ← double-click this each morning

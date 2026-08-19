@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSheetId, validateConfig } from './env.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadConfig, parseSheetId, validateConfig } from './env.js';
 import { redactText } from './redact.js';
 import { isRetryableGoogleError, withRetry } from './util.js';
 import { jwtExpMs, AuthSession } from './cognito.js';
@@ -12,6 +14,22 @@ describe('parseSheetId', () => {
       parseSheetId('https://docs.google.com/spreadsheets/d/1AbCDefGhIJklmn/edit#gid=0'),
       '1AbCDefGhIJklmn',
     );
+  });
+});
+
+describe('loadConfig protoDir', () => {
+  it('defaults to src/proto next to this module', () => {
+    const prev = process.env.PROTO_DIR;
+    delete process.env.PROTO_DIR;
+    try {
+      const cfg = loadConfig();
+      assert.equal(path.basename(cfg.protoDir), 'proto');
+      assert.ok(fs.existsSync(path.join(cfg.protoDir, 'footprint.proto')));
+      assert.ok(fs.existsSync(path.join(cfg.protoDir, 'ohlc_bars.proto')));
+    } finally {
+      if (prev === undefined) delete process.env.PROTO_DIR;
+      else process.env.PROTO_DIR = prev;
+    }
   });
 });
 

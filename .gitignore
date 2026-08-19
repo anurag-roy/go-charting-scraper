@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+dist/
 google-service-account.json
 **/google-service-account.json
 service-account*.json
