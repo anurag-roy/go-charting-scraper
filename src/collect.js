@@ -121,7 +121,7 @@ export async function sampleInstruments({
     for (const { interval, fp, ohlc } of results) {
       const ohlcBars = dedupeOhlcBars([
         ...(ohlc?.bars || []),
-        ...client.ohlcCollector.getBars(instrument.id, interval),
+        ...client.ohlcCollector.getBars(symbolId(instrument), interval),
       ]);
       const closed = closedRowsForInterval({
         instrument,
@@ -136,11 +136,14 @@ export async function sampleInstruments({
         error: fp?.error,
       });
       rows.push(...closed);
+      const ohlcMiss = closed.filter((r) => r.open === '' || r.close === '').length;
       summaries.push({
         id: instrument.id,
         interval,
         closed: closed.length,
         candles: (fp?.candles || []).length,
+        ohlcBars: ohlcBars.length,
+        ohlcMiss,
         error: fp?.ok ? '' : (fp?.error || ''),
       });
     }

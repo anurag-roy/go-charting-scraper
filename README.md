@@ -64,7 +64,7 @@ Each static tab (`1A`, `1B`, `1C`, …) uses this schema:
 | Column | Meaning |
 | --- | --- |
 | `candle_time` | Candle open time in IST (no `+05:30` suffix) |
-| `open` / `high` / `low` / `close` | Matching OHLC bar (`high`/`low` fall back to footprint if the bar is missing) |
+| `open` / `high` / `low` / `close` | Matching OHLC bar (`high`/`low` fall back to footprint if the bar is missing). If a candle was stored without open/close, a later sample fills those cells (and `oi_change` / `vwap`) in place. |
 | `delta` | Buy volume − sell volume |
 | `max_delta` | Intra-bar cumulative-delta high |
 | `max_vol_b` / `max_vol_s` | Max buy / sell volume at a single price |
