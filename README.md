@@ -57,6 +57,7 @@ Each `{symbol} 2m` / `3m` / `5m` tab uses this schema:
 | Column | Meaning |
 | --- | --- |
 | `candle_time` | Candle open time in IST (no `+05:30` suffix) |
+| `open` / `high` / `low` / `close` | Matching OHLC bar (`high`/`low` fall back to footprint if the bar is missing) |
 | `delta` | Buy volume − sell volume |
 | `max_delta` | Intra-bar cumulative-delta high |
 | `max_vol_b` / `max_vol_s` | Max buy / sell volume at a single price |

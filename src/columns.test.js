@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   SHEET_COLUMNS,
   formatSheetCandleTime,
+  isLegacyOhlcHeader,
   isLegacyVwapHeader,
   mapSheetRow,
   rowToSheetValues,
@@ -26,9 +27,13 @@ describe('sheet helpers', () => {
     assert.equal(formatSheetCandleTime('2026-08-17T09:15:00+05:30'), '2026-08-17T09:15:00');
   });
 
-  it('writes only the slim 9-column schema with vwap', () => {
+  it('writes OHLC immediately after candle_time, then the slim metrics', () => {
     const values = rowToSheetValues({
       candle_time: '2026-08-17T09:15:00+05:30',
+      open: 100,
+      high: 110,
+      low: 99,
+      close: 105,
       delta: 40,
       max_delta: 80,
       max_vol_b: 50,
@@ -38,27 +43,41 @@ describe('sheet helpers', () => {
       oi_change: 12,
       vwap: 7800.5,
       vwap2: 7873.38,
-      open: 1,
     });
     assert.deepEqual(values, [
       '2026-08-17T09:15:00',
+      100, 110, 99, 105,
       40, 80, 50, 30, 24300, 150, 12, 7800.5,
     ]);
-    assert.equal(SHEET_COLUMNS.length, 9);
-    assert.deepEqual(SHEET_COLUMNS.slice(-1), ['vwap']);
+    assert.deepEqual(SHEET_COLUMNS, [
+      'candle_time', 'open', 'high', 'low', 'close',
+      'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
+      'poc', 'volume', 'oi_change', 'vwap',
+    ]);
   });
 
-  it('treats vwap1/vwap2 headers as legacy and maps vwap1 onto vwap', () => {
-    const legacy = [
+  it('treats pre-OHLC and vwap1/vwap2 headers as legacy and maps onto the current schema', () => {
+    const preOhlc = [
+      'candle_time', 'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
+      'poc', 'volume', 'oi_change', 'vwap',
+    ];
+    const legacyVwap = [
       'candle_time', 'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
       'poc', 'volume', 'oi_change', 'vwap1', 'vwap2',
     ];
-    assert.equal(isLegacyVwapHeader(legacy, SHEET_COLUMNS), true);
-    assert.equal(shouldRewriteHeader(legacy, SHEET_COLUMNS), true);
+    assert.equal(isLegacyOhlcHeader(preOhlc, SHEET_COLUMNS), true);
+    assert.equal(isLegacyOhlcHeader(legacyVwap, SHEET_COLUMNS), true);
+    assert.equal(isLegacyVwapHeader(legacyVwap, preOhlc), true);
+    assert.equal(shouldRewriteHeader(preOhlc, SHEET_COLUMNS), true);
+    assert.equal(shouldRewriteHeader(legacyVwap, SHEET_COLUMNS), true);
     assert.equal(shouldRewriteHeader(SHEET_COLUMNS, SHEET_COLUMNS), false);
     assert.deepEqual(
-      mapSheetRow(legacy, ['2026-08-17T09:15:00+05:30', 1, 2, 3, 4, 5, 6, 7, 80.1, 99]),
-      ['2026-08-17T09:15:00', 1, 2, 3, 4, 5, 6, 7, 80.1],
+      mapSheetRow(legacyVwap, ['2026-08-17T09:15:00+05:30', 1, 2, 3, 4, 5, 6, 7, 80.1, 99]),
+      ['2026-08-17T09:15:00', '', '', '', '', 1, 2, 3, 4, 5, 6, 7, 80.1],
+    );
+    assert.deepEqual(
+      mapSheetRow(preOhlc, ['2026-08-17T09:15:00+05:30', 1, 2, 3, 4, 5, 6, 7, 80.1]),
+      ['2026-08-17T09:15:00', '', '', '', '', 1, 2, 3, 4, 5, 6, 7, 80.1],
     );
     assert.equal(sheetCandleDate('2026-08-17T09:15:00+05:30'), '2026-08-17');
   });
@@ -84,12 +103,15 @@ describe('SheetsSink', () => {
     };
 
     const n = await sink.writeRows([
-      { ok: true, contract: 'NIFTY2681824300CE', interval: '2m', candle_time: '2026-08-17T09:15:00+05:30', delta: 1 },
+      { ok: true, contract: 'NIFTY2681824300CE', interval: '2m', candle_time: '2026-08-17T09:15:00+05:30', open: 1, high: 2, low: 1, close: 1.5, delta: 1 },
       { ok: true, contract: 'NIFTY2681824300CE', interval: '2m', candle_time: '2026-08-17T09:17:00+05:30', delta: 2 },
       { ok: true, contract: 'CRUDEOIL-I', interval: '5m', candle_time: '2026-08-17T09:15:00+05:30', delta: 3 },
     ]);
     assert.equal(n, 3);
     assert.equal(appended[0].range, sheetA1(tab2, 'A1'));
+    assert.deepEqual(appended[0].requestBody.values[0].slice(0, 6), [
+      '2026-08-17T09:15:00', 1, 2, 1, 1.5, 1,
+    ]);
     assert.equal(appended[1].range, sheetA1(tab5, 'A1'));
   });
 
@@ -107,11 +129,10 @@ describe('SheetsSink', () => {
     assert.equal(sink.loadedTabs.has(oldTab), false);
   });
 
-  it('retainSession drops previous-day rows and remaps vwap1 to vwap', async () => {
+  it('retainSession drops previous-day rows and keeps today's current-schema values', async () => {
     const tab = sheetTabName('NIFTY-I', '2m');
-    const legacyHeader = [
-      'candle_time', 'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
-      'poc', 'volume', 'oi_change', 'vwap1', 'vwap2',
+    const today = [
+      '2026-08-18T09:15:00', 100, 110, 99, 105, 8, 9, 10, 11, 12, 13, 14, 20.2,
     ];
     const calls = { get: [], update: [], clear: [], batchUpdate: [] };
     const titles = new Set([tab]);
@@ -126,9 +147,9 @@ describe('SheetsSink', () => {
             return {
               data: {
                 values: [
-                  legacyHeader,
-                  ['2026-08-17T09:15:00+05:30', 1, 2, 3, 4, 5, 6, 7, 10.1, 11],
-                  ['2026-08-18T09:15:00+05:30', 8, 9, 10, 11, 12, 13, 14, 20.2, 21],
+                  SHEET_COLUMNS,
+                  ['2026-08-17T09:15:00', 90, 95, 88, 92, 1, 2, 3, 4, 5, 6, 7, 10.1],
+                  today,
                 ],
               },
             };
@@ -143,11 +164,78 @@ describe('SheetsSink', () => {
     assert.equal(dropped, 1);
     assert.equal(calls.clear.length, 1);
     assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
-    assert.deepEqual(calls.update[1].requestBody.values[0], [
-      '2026-08-18T09:15:00', 8, 9, 10, 11, 12, 13, 14, 20.2,
-    ]);
+    assert.deepEqual(calls.update[1].requestBody.values[0], today);
     assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
     assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), true);
+  });
+
+  it('retainSession clears pre-OHLC rows so the next sample can backfill them', async () => {
+    const tab = sheetTabName('NIFTY-I', '2m');
+    const legacyHeader = [
+      'candle_time', 'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
+      'poc', 'volume', 'oi_change', 'vwap1', 'vwap2',
+    ];
+    const calls = { update: [], clear: [] };
+    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
+    sink.sheetsApi = {
+      spreadsheets: {
+        get: async () => ({ data: { sheets: [{ properties: { title: tab } }] } }),
+        values: {
+          get: async () => ({
+            data: {
+              values: [
+                legacyHeader,
+                ['2026-08-17T09:15:00+05:30', 1, 2, 3, 4, 5, 6, 7, 10.1, 11],
+                ['2026-08-18T09:15:00+05:30', 8, 9, 10, 11, 12, 13, 14, 20.2, 21],
+              ],
+            },
+          }),
+          update: async (req) => { calls.update.push(req); return {}; },
+          clear: async (req) => { calls.clear.push(req); return {}; },
+        },
+      },
+    };
+
+    const dropped = await sink.retainSession('NIFTY-I', ['2m'], '2026-08-18');
+    assert.equal(dropped, 1);
+    assert.equal(calls.clear.length, 1);
+    assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
+    assert.equal(calls.update.length, 1);
+    assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
+    assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), false);
+  });
+
+  it('ensureInstrument drops pre-OHLC rows so they are backfilled with open/high/low/close', async () => {
+    const tab = sheetTabName('NIFTY-I', '2m');
+    const oldHeader = [
+      'candle_time', 'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
+      'poc', 'volume', 'oi_change', 'vwap',
+    ];
+    const calls = { update: [], clear: [] };
+    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
+    sink.sheetsApi = {
+      spreadsheets: {
+        get: async () => ({ data: { sheets: [{ properties: { title: tab } }] } }),
+        values: {
+          get: async () => ({
+            data: {
+              values: [
+                oldHeader,
+                ['2026-08-18T09:15:00', 1, 2, 3, 4, 5, 6, 7, 80.1],
+              ],
+            },
+          }),
+          update: async (req) => { calls.update.push(req); return {}; },
+          clear: async (req) => { calls.clear.push(req); return {}; },
+        },
+      },
+    };
+
+    await sink.ensureInstrument('NIFTY-I', ['2m']);
+    assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
+    assert.equal(calls.clear.length, 1);
+    assert.equal(calls.update.length, 1);
+    assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), false);
   });
 });
 
@@ -194,8 +282,15 @@ describe('closedRowsForInterval', () => {
     assert.equal(rows[0].candle_time, '2026-08-17T09:15:00+05:30');
     assert.equal(rows[0].contract, 'NIFTY-I');
     assert.equal(rows[0].ok, true);
+    assert.equal(rows[0].open, 1);
+    assert.equal(rows[0].high, 2);
+    assert.equal(rows[0].low, 1);
+    assert.equal(rows[0].close, 2);
     assert.equal(rows[0].oi_change, '');
     assert.equal(rows[0].vwap, 1.67);
     assert.equal(rows[0].vwap2, undefined);
+    assert.deepEqual(rowToSheetValues(rows[0]).slice(0, 5), [
+      '2026-08-17T09:15:00', 1, 2, 1, 2,
+    ]);
   });
 });

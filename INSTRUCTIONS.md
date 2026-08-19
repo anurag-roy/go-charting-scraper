@@ -53,6 +53,7 @@ the market-data WebSocket, and for each configured instrument persists every
 | Sheet column | Meaning |
 | --- | --- |
 | `candle_time` | Candle open time in IST (no `+05:30` suffix) |
+| `open` / `high` / `low` / `close` | Matching OHLC bar (`high`/`low` fall back to footprint if the bar is missing) |
 | `delta` | Buy volume − sell volume |
 | `max_delta` | Intra-bar cumulative-delta high |
 | `max_vol_b` / `max_vol_s` | Largest buy / sell volume at any single price |

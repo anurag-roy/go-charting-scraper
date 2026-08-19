@@ -1,6 +1,10 @@
 /** Slim schema written to Google Sheets. */
 export const SHEET_COLUMNS = [
   'candle_time',
+  'open',
+  'high',
+  'low',
+  'close',
   'delta',
   'max_delta',
   'max_vol_b',
@@ -12,6 +16,7 @@ export const SHEET_COLUMNS = [
 ];
 
 const VWAP_HEADER_ALIASES = ['vwap', 'vwap1', 'vwap2'];
+const OHLC_COLUMNS = ['open', 'high', 'low', 'close'];
 
 /** Wider debug schema for optional local CSV. */
 export const COLUMNS = [
@@ -187,10 +192,22 @@ export function isLegacyVwapHeader(header, columns) {
   return vwapLegacyHeaders(columns).some((legacy) => headersMatch(header, legacy));
 }
 
+/** Previous sheet schema omitted `open`/`high`/`low`/`close` after `candle_time`. */
+export function isLegacyOhlcHeader(header, columns) {
+  if (!Array.isArray(header) || !header.length) return false;
+  const without = (columns || []).filter((c) => !OHLC_COLUMNS.includes(c));
+  if (without.length === (columns || []).length) return false;
+  if (headersMatch(header, columns)) return false;
+  if (headersMatch(header, without)) return true;
+  return isLegacyVwapHeader(header, without);
+}
+
 export function shouldRewriteHeader(header, columns) {
   if (!Array.isArray(header) || !header.length) return true;
   if (headersMatch(header, columns)) return false;
-  return isPrefixHeader(header, columns) || isLegacyVwapHeader(header, columns);
+  return isPrefixHeader(header, columns)
+    || isLegacyVwapHeader(header, columns)
+    || isLegacyOhlcHeader(header, columns);
 }
 
 /** IST calendar date (`YYYY-MM-DD`) from a sheet `candle_time` value. */
