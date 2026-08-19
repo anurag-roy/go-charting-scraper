@@ -152,8 +152,8 @@ describe('SheetsSink', () => {
     const dropped = await sink.retainSession('NIFTY-I', ['2m'], '2026-08-18');
     assert.equal(dropped, 1);
     assert.equal(calls.clear.length, 1);
-    assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
-    assert.deepEqual(calls.update[1].requestBody.values[0], today);
+    assert.equal(calls.update.length, 1);
+    assert.deepEqual(calls.update[0].requestBody.values[0], today);
     assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
     assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), true);
   });
