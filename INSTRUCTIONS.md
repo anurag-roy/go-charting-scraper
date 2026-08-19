@@ -52,15 +52,16 @@ the market-data WebSocket, and for each configured instrument persists every
 
 | Sheet column | Meaning |
 | --- | --- |
+| `symbol` | Contract code only (`NIFTY26AUG24050CE`), not `NSE:OPTIONS:…` |
 | `candle_time` | Candle open time in IST (no `+05:30` suffix) |
-| `open` / `high` / `low` / `close` | Matching OHLC bar (`high`/`low` fall back to footprint if the bar is missing) |
+| `open` / `high` / `low` / `close` | Matching OHLC bar, ticks ÷ 100 (`high`/`low` fall back to footprint if the bar is missing) |
 | `delta` | Buy volume − sell volume |
-| `max_delta` | Intra-bar cumulative-delta high |
+| `max_delta` | Intra-bar cumulative-delta high (`0` when missing or negative) |
 | `max_vol_b` / `max_vol_s` | Largest buy / sell volume at any single price |
 | `poc` | Point of control (price with most buy+sell volume) |
 | `volume` | Footprint candle volume |
 | `oi_change` | This bar’s open interest minus the previous bar’s |
-| `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
+| `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, ticks ÷ 100, 2 decimal places |
 
 The in-progress (forming) candle is **not** written. After a bar’s end the
 process waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the
@@ -378,7 +379,7 @@ The eighteen tabs `1A`–`6C` are created if missing and **never deleted**.
 Point VLOOKUP / INDEX formulas at those names; they stay stable when you
 change a symbol or timeframe. Column Z on each data tab records which
 instrument and interval currently occupy it (`1|2m|NSE:FUTURE:NIFTY-I`).
-Leave A:M for your formulas.
+Leave A:N for your formulas (column A is the contract `symbol`).
 
 If you change the symbol or a timeframe cell while the market is open, the
 scraper **overwrites the rows inside** that slot’s tabs and backfills today.
@@ -389,10 +390,7 @@ Older spreadsheets may still have leftover `{symbol} {interval}` tabs from
 earlier versions; those are left in place and no longer written.
 
 Sheet schema is listed in [§1](#1-what-you-get). Optional CSV
-(`WRITE_CSV=1`) keeps a wider debug schema including OHLC and recompute
-columns.
-
-Prices and POC are **integer ticks** as sent by the feed.
+(`WRITE_CSV=1`) keeps a wider debug schema including raw ticks.
 
 ---
 

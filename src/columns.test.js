@@ -8,8 +8,11 @@ import {
   mapSheetRow,
   rowHasOhlc,
   rowToSheetValues,
+  scaleSheetPrice,
   selectSheetWrites,
   sheetCandleDate,
+  sheetDisplaySymbol,
+  sheetMaxDelta,
   sheetRowMissingOhlc,
   sheetRowNeedsPatch,
   sheetTabName,
@@ -41,30 +44,37 @@ describe('sheet helpers', () => {
     assert.equal(formatSheetCandleTime('2026-08-17T09:15:00+05:30'), '2026-08-17T09:15:00');
   });
 
-  it('writes OHLC immediately after candle_time, then the slim metrics', () => {
+  it('writes a leading contract symbol, scaled OHLC/VWAP, and clamped max_delta', () => {
     const values = rowToSheetValues({
+      contract: 'NIFTY26AUG24050CE',
+      symbol: 'NSE:OPTIONS:NIFTY26AUG24050CE',
       candle_time: '2026-08-17T09:15:00+05:30',
-      open: 100,
-      high: 110,
-      low: 99,
-      close: 105,
+      open: 17250,
+      high: 17300,
+      low: 17100,
+      close: 17250,
       delta: 40,
-      max_delta: 80,
+      max_delta: -80,
       max_vol_b: 50,
       max_vol_s: 30,
       poc: 24300,
       volume: 150,
       oi_change: 12,
-      vwap: 7800.5,
-      vwap2: 7873.38,
+      vwap: 17249.6,
     });
     assert.deepEqual(values, [
+      'NIFTY26AUG24050CE',
       '2026-08-17T09:15:00',
-      100, 110, 99, 105,
-      40, 80, 50, 30, 24300, 150, 12, 7800.5,
+      172.5, 173, 171, 172.5,
+      40, 0, 50, 30, 24300, 150, 12, 172.5,
     ]);
+    assert.equal(sheetDisplaySymbol('NSE:OPTIONS:NIFTY26AUG24050CE'), 'NIFTY26AUG24050CE');
+    assert.equal(sheetMaxDelta(''), 0);
+    assert.equal(sheetMaxDelta(-5), 0);
+    assert.equal(sheetMaxDelta(12), 12);
+    assert.equal(scaleSheetPrice(17250), 172.5);
     assert.deepEqual(SHEET_COLUMNS, [
-      'candle_time', 'open', 'high', 'low', 'close',
+      'symbol', 'candle_time', 'open', 'high', 'low', 'close',
       'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
       'poc', 'volume', 'oi_change', 'vwap',
     ]);
@@ -76,12 +86,17 @@ describe('sheet helpers', () => {
       'delta', 'max_delta', 'max_vol_b', 'max_vol_s',
       'poc', 'volume', 'oi_change', 'vwap1', 'vwap2',
     ];
-    assert.equal(isLegacyVwapHeader(legacy, SHEET_COLUMNS), true);
+    assert.equal(isLegacyVwapHeader(legacy, SHEET_COLUMNS.slice(1)), true);
     assert.equal(shouldRewriteHeader(legacy, SHEET_COLUMNS), true);
     assert.equal(shouldRewriteHeader(SHEET_COLUMNS, SHEET_COLUMNS), false);
     assert.deepEqual(
-      mapSheetRow(legacy, ['2026-08-17T09:15:00+05:30', 100, 110, 99, 105, 1, 2, 3, 4, 5, 6, 7, 80.1, 99]),
-      ['2026-08-17T09:15:00', 100, 110, 99, 105, 1, 2, 3, 4, 5, 6, 7, 80.1],
+      mapSheetRow(
+        legacy,
+        ['2026-08-17T09:15:00+05:30', 17250, 17300, 17100, 17250, 1, 2, 3, 4, 5, 6, 7, 8010, 99],
+        SHEET_COLUMNS,
+        { symbol: 'NIFTY-I' },
+      ),
+      ['NIFTY-I', '2026-08-17T09:15:00', 172.5, 173, 171, 172.5, 1, 2, 3, 4, 5, 6, 7, 80.1],
     );
     assert.equal(sheetCandleDate('2026-08-17T09:15:00+05:30'), '2026-08-17');
   });
@@ -90,7 +105,7 @@ describe('sheet helpers', () => {
     assert.equal(rowHasOhlc({ open: 1, close: 2 }), true);
     assert.equal(rowHasOhlc({ open: '', close: 2 }), false);
     assert.equal(sheetRowMissingOhlc(SHEET_COLUMNS, [
-      '2026-08-17T09:15:00', '', 110, 99, '', 1, 2, 3, 4, 5, 6, '', '',
+      'NIFTY-I', '2026-08-17T09:15:00', '', 1.1, 0.99, '', 1, 2, 3, 4, 5, 6, '', '',
     ]), true);
     const tab = '1A';
     const keys = new Set([`${tab}\t2026-08-17T09:15:00`, `${tab}\t2026-08-17T09:17:00`]);
@@ -111,7 +126,7 @@ describe('sheet helpers', () => {
 
   it('treats a blank max_delta as incomplete even when OHLC is filled', () => {
     const row = [
-      '2026-08-19T10:25:00', 241280, 241280, 241210, 241214, -3770, '', 1560, 4745, 241250, 12610, -2145, 241467.38,
+      'NIFTY-I', '2026-08-19T10:25:00', 2412.8, 2412.8, 2412.1, 2412.14, -3770, '', 1560, 4745, 241250, 12610, -2145, 2414.67,
     ];
     assert.equal(sheetRowMissingOhlc(SHEET_COLUMNS, row), false);
     assert.equal(sheetRowNeedsPatch(SHEET_COLUMNS, row), true);
@@ -146,16 +161,16 @@ describe('SheetsSink', () => {
     };
 
     const n = await sink.writeRows([
-      { ok: true, slot: 1, intervals: ['2m', '3m', '5m'], interval: '2m', candle_time: '2026-08-17T09:15:00+05:30', open: 1, high: 2, low: 1, close: 1.5, delta: 1, max_delta: 80 },
+      { ok: true, slot: 1, intervals: ['2m', '3m', '5m'], interval: '2m', contract: 'NIFTY-I', candle_time: '2026-08-17T09:15:00+05:30', open: 17250, high: 17300, low: 17100, close: 17250, delta: 1, max_delta: 80 },
       { ok: true, slot: 1, intervals: ['2m', '3m', '5m'], interval: '2m', candle_time: '2026-08-17T09:17:00+05:30', delta: 2 },
-      { ok: true, slot: 2, intervals: ['2m', '3m', '5m'], interval: '5m', candle_time: '2026-08-17T09:15:00+05:30', delta: 3 },
+      { ok: true, slot: 2, intervals: ['2m', '3m', '5m'], interval: '5m', contract: 'BANKNIFTY-I', candle_time: '2026-08-17T09:15:00+05:30', delta: 3 },
     ]);
     assert.equal(n, 3);
     assert.equal(tab2, '1A');
     assert.equal(tab5, '2C');
     assert.equal(appended[0].range, sheetA1(tab2, 'A1'));
-    assert.deepEqual(appended[0].requestBody.values[0].slice(0, 6), [
-      '2026-08-17T09:15:00', 1, 2, 1, 1.5, 1,
+    assert.deepEqual(appended[0].requestBody.values[0].slice(0, 7), [
+      'NIFTY-I', '2026-08-17T09:15:00', 172.5, 173, 171, 172.5, 1,
     ]);
     assert.equal(appended[1].range, sheetA1(tab5, 'A1'));
     assert.equal(sink.incompleteKeys.has(`${tab2}\t2026-08-17T09:17:00`), true);
@@ -178,7 +193,7 @@ describe('SheetsSink', () => {
               data: {
                 values: [
                   SHEET_COLUMNS,
-                  ['2026-08-17T09:15:00', '', 110, 99, '', 1, 2, 3, 4, 5, 6, '', ''],
+                  ['NIFTY-I', '2026-08-17T09:15:00', '', 1.1, 0.99, '', 1, 2, 3, 4, 5, 6, '', ''],
                 ],
               },
             };
@@ -201,22 +216,24 @@ describe('SheetsSink', () => {
         slot: 1,
         intervals: ['2m', '3m', '5m'],
         interval: '2m',
+        contract: 'NIFTY-I',
         candle_time: '2026-08-17T09:15:00+05:30',
-        open: 100,
-        high: 110,
-        low: 99,
-        close: 105,
+        open: 10000,
+        high: 11000,
+        low: 9900,
+        close: 10500,
         delta: 1,
+        max_delta: 2,
         oi_change: 12,
-        vwap: 101.5,
+        vwap: 10150,
       },
     ]);
     assert.equal(n, 1);
     assert.equal(calls.append.length, 0);
     assert.equal(calls.batchUpdate.length, 1);
     assert.equal(calls.batchUpdate[0].requestBody.data[0].range, sheetA1(tab, 'A2'));
-    assert.deepEqual(calls.batchUpdate[0].requestBody.data[0].values[0].slice(0, 5), [
-      '2026-08-17T09:15:00', 100, 110, 99, 105,
+    assert.deepEqual(calls.batchUpdate[0].requestBody.data[0].values[0].slice(0, 6), [
+      'NIFTY-I', '2026-08-17T09:15:00', 100, 110, 99, 105,
     ]);
     assert.equal(sink.incompleteKeys.has(`${tab}\t2026-08-17T09:15:00`), false);
   });
@@ -237,7 +254,7 @@ describe('SheetsSink', () => {
               data: {
                 values: [
                   SHEET_COLUMNS,
-                  ['2026-08-19T10:25:00', 241280, 241280, 241210, 241214, -3770, '', 1560, 4745, 241250, 12610, -2145, 241467.38],
+                  ['NIFTY-I', '2026-08-19T10:25:00', 2412.8, 2412.8, 2412.1, 2412.14, -3770, '', 1560, 4745, 241250, 12610, -2145, 2414.67],
                 ],
               },
             };
@@ -260,6 +277,7 @@ describe('SheetsSink', () => {
         slot: 1,
         intervals: ['2m', '3m', '5m'],
         interval: '5m',
+        contract: 'NIFTY-I',
         candle_time: '2026-08-19T10:25:00+05:30',
         open: 241280,
         high: 241280,
@@ -278,7 +296,7 @@ describe('SheetsSink', () => {
     assert.equal(n, 1);
     assert.equal(calls.append.length, 0);
     assert.equal(calls.batchUpdate.length, 1);
-    assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][6], 0);
+    assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][7], 0);
     assert.equal(sink.incompleteKeys.has(`${tab}\t2026-08-19T10:25:00`), false);
   });
 
@@ -301,7 +319,7 @@ describe('SheetsSink', () => {
   it('retainSession drops previous-day rows and keeps today on the current schema', async () => {
     const tab = sheetTabName(1, 0);
     const today = [
-      '2026-08-18T09:15:00', 100, 110, 99, 105, 8, 9, 10, 11, 12, 13, 14, 20.2,
+      'NIFTY-I', '2026-08-18T09:15:00', 1, 1.1, 0.99, 1.05, 8, 9, 10, 11, 12, 13, 14, 0.2,
     ];
     const calls = { get: [], update: [], clear: [], batchUpdate: [] };
     const titles = new Set([tab]);
@@ -317,7 +335,7 @@ describe('SheetsSink', () => {
               data: {
                 values: [
                   SHEET_COLUMNS,
-                  ['2026-08-17T09:15:00', 90, 95, 88, 92, 1, 2, 3, 4, 5, 6, 7, 10.1],
+                  ['NIFTY-I', '2026-08-17T09:15:00', 0.9, 0.95, 0.88, 0.92, 1, 2, 3, 4, 5, 6, 7, 0.1],
                   today,
                 ],
               },
@@ -382,7 +400,7 @@ describe('SheetsSink', () => {
     assert.equal(calls.clear.length, 1);
     assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
     assert.deepEqual(calls.update[1].requestBody.values[0], [
-      '2026-08-18T09:15:00', 100, 110, 99, 105, 8, 9, 10, 11, 12, 13, 14, 20.2,
+      'NIFTY-I', '2026-08-18T09:15:00', 1, 1.1, 0.99, 1.05, 8, 9, 10, 11, 12, 13, 14, 0.2,
     ]);
     assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
     assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), true);
@@ -486,8 +504,8 @@ describe('closedRowsForInterval', () => {
     assert.equal(rows[0].oi_change, '');
     assert.equal(rows[0].vwap, 1.67);
     assert.equal(rows[0].vwap2, undefined);
-    assert.deepEqual(rowToSheetValues(rows[0]).slice(0, 5), [
-      '2026-08-17T09:15:00', 1, 2, 1, 2,
+    assert.deepEqual(rowToSheetValues(rows[0]).slice(0, 6), [
+      'NIFTY-I', '2026-08-17T09:15:00', 0.01, 0.02, 0.01, 0.02,
     ]);
   });
 });

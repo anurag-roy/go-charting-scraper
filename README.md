@@ -63,15 +63,16 @@ Each static tab (`1A`, `1B`, `1C`, …) uses this schema:
 
 | Column | Meaning |
 | --- | --- |
+| `symbol` | Contract code only (`NIFTY26AUG24050CE`), not `NSE:OPTIONS:…` |
 | `candle_time` | Candle open time in IST (no `+05:30` suffix) |
-| `open` / `high` / `low` / `close` | Matching OHLC bar (`high`/`low` fall back to footprint if the bar is missing). If a candle was stored without open/close, a later sample fills those cells (and `oi_change` / `vwap`) in place. |
+| `open` / `high` / `low` / `close` | Matching OHLC bar, ticks ÷ 100 (`high`/`low` fall back to footprint if the bar is missing). If a candle was stored without open/close, a later sample fills those cells (and `oi_change` / `vwap`) in place. |
 | `delta` | Buy volume − sell volume |
-| `max_delta` | Intra-bar cumulative-delta high |
+| `max_delta` | Intra-bar cumulative-delta high (`0` when missing or negative) |
 | `max_vol_b` / `max_vol_s` | Max buy / sell volume at a single price |
 | `poc` | Point of control |
 | `volume` | Footprint candle volume |
 | `oi_change` | Change in open interest vs the previous OHLC bar |
-| `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume |
+| `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, ticks ÷ 100, 2 decimal places |
 
 ## Run
 
