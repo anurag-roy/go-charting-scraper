@@ -69,12 +69,9 @@ export function footprintMetrics(candle) {
   const delta = hasOwn(es, 'closeDelta', 'close_delta')
     ? num(pick(es, 'closeDelta', 'close_delta'))
     : deltaRecomputed;
-  const maxDelta = hasOwn(es, 'maxDelta', 'max_delta')
-    ? num(pick(es, 'maxDelta', 'max_delta'))
-    : '';
-  const minDelta = hasOwn(es, 'minDelta', 'min_delta')
-    ? num(pick(es, 'minDelta', 'min_delta'))
-    : '';
+  // proto3 omits int64 0, so a missing max/min delta is 0 (the wire default), not "unknown".
+  const maxDelta = num(pick(es, 'maxDelta', 'max_delta'));
+  const minDelta = num(pick(es, 'minDelta', 'min_delta'));
 
   const esHigh = num(es.high);
   const esLow = num(es.low);

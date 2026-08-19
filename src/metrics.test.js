@@ -19,10 +19,24 @@ describe('footprintMetrics', () => {
   it('maps delta, max delta, POC, volume, and max buy/sell', () => {
     const m = footprintMetrics(candle);
     assert.equal(m.delta, 40);
+    assert.equal(m.max_delta, 80);
     assert.equal(m.volume, 150);
     assert.equal(m.poc, 100);
     assert.equal(m.values_match, true);
     assert.equal(m.vwap2, undefined);
+  });
+
+  it('treats omitted proto3 max_delta as 0, not blank', () => {
+    const m = footprintMetrics({
+      date: '2026-08-19T10:25:00+05:30',
+      ending_summary: { close_delta: -3770, min_delta: -3835, high: 241280, low: 241210 },
+      totals: { buy: { volume: 4420 }, sell: { volume: 8190 } },
+      max: { buy: { volume: 1560 }, sell: { volume: 4745 } },
+      footprint: [{ level: 241250, buy: { volume: 1560 }, sell: { volume: 4745 } }],
+    });
+    assert.equal(m.delta, -3770);
+    assert.equal(m.max_delta, 0);
+    assert.equal(m.min_delta, -3835);
   });
 });
 
