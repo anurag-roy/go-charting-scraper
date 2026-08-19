@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "once": "ONCE=1 node src/index.js",
-    "test": "node --test src/*.test.js"
+    "test": "node --test src/*.test.js",
+    "pack": "node scripts/pack.js"
   },
   "engines": {
     "node": ">=20"
@@ -18,5 +19,8 @@
     "pako": "^3.0.1",
     "protobufjs": "^8.7.2",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

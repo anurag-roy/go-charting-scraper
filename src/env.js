@@ -3,8 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const repoRoot = path.join(__dirname, '..');
+const here = path.dirname(fileURLToPath(import.meta.url));
+// `src/env.js` lives one level below the repo; the packed `index.js` sits next
+// to package.json. Prefer the directory that actually contains package.json.
+export const repoRoot = fs.existsSync(path.join(here, 'package.json'))
+  ? here
+  : path.join(here, '..');
 
 dotenv.config({ path: path.join(repoRoot, '.env'), quiet: true });
 
@@ -79,7 +83,9 @@ export function loadConfig() {
     once: flag('ONCE'),
     debugJsonl: flag('DEBUG_JSONL'),
     outDir: process.env.OUT_DIR || path.join(repoRoot, 'logs'),
-    protoDir: process.env.PROTO_DIR || path.join(repoRoot, 'investigation', 'evidence'),
+    protoDir: process.env.PROTO_DIR
+      ? resolvePathMaybe(process.env.PROTO_DIR)
+      : path.join(here, 'proto'),
   };
 }
 

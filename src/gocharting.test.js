@@ -1,7 +1,16 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import WebSocket from 'ws';
-import { allocOhlcIdx, FootprintClient } from './gocharting.js';
+import { allocOhlcIdx, FootprintClient, loadProtos } from './gocharting.js';
+import { loadConfig } from './env.js';
+
+describe('loadProtos', () => {
+  it('loads footprint and OHLC types from src/proto', async () => {
+    const { FP, OHLC } = await loadProtos(loadConfig().protoDir);
+    assert.equal(FP.name, 'FootPrintForDateResponse');
+    assert.equal(OHLC.name, 'OHLCBarResult');
+  });
+});
 
 describe('allocOhlcIdx', () => {
   it('gives each in-flight request a distinct pane index and reuses freed slots', () => {

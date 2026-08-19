@@ -14,7 +14,7 @@ Related reading:
 - [`WINDOWS.md`](WINDOWS.md) — Windows laptop handover (daily start, sleep, gaps)
 - [`.env.example`](.env.example) — Google credentials and optional knobs
 - [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service) — systemd unit
-- [`investigation/FINDINGS.md`](investigation/FINDINGS.md) — WebSocket + Protobuf protocol (not required to run)
+- [`src/proto/`](src/proto/) — WebSocket Protobuf schemas (not required to operate)
 
 ---
 
@@ -38,7 +38,7 @@ Related reading:
 16. [What the scraper does *not* do](#16-what-the-scraper-does-not-do)
 17. [Troubleshooting](#17-troubleshooting)
 18. [Security](#18-security)
-19. [Investigation scripts (optional)](#19-investigation-scripts-optional)
+19. [Shareable zip](#19-shareable-zip)
 
 ---
 
@@ -94,8 +94,8 @@ You do not need this to operate it. It explains outbound hosts and secrets.
    `TS/V2` `OHLCV/V2`.
 6. The server replies with **binary Protobuf** frames (sometimes deflate-
    compressed). They are decoded with
-   `investigation/evidence/footprint.proto` and
-   `investigation/evidence/ohlc_bars.proto`.
+   `src/proto/footprint.proto` and
+   `src/proto/ohlc_bars.proto`.
 7. Closed candles in that exchange’s session window are written to **static**
    tabs `1A`, `1B`, `1C`, `2A`, … (Instrument1’s first timeframe → `1A`,
    Instrument2’s first timeframe → `2A`). If the symbol or timeframe for a
@@ -232,10 +232,10 @@ Layout you will use:
 go-charting-scraper/
   package.json                 ← production app
   src/index.js                 ← 24×7 entrypoint
+  src/proto/                   ← Protobuf schemas the decoder needs
   .env.example                 ← copy to .env (gitignored)
   deploy/gocharting-scraper.service
   logs/                        ← error.log + status.json at runtime
-  investigation/evidence/      ← Protobuf schemas the decoder needs
 ```
 
 ---
@@ -359,6 +359,7 @@ spreadsheet id are required.
 | `CSV_PATH` | `logs/maxvol.csv` | CSV destination |
 | `ERROR_LOG_PATH` | `logs/error.log` | Rotating error log |
 | `STATUS_PATH` | `logs/status.json` | Heartbeat (instruments, last sample, WS state) |
+| `PROTO_DIR` | `src/proto` | Directory with `footprint.proto` and `ohlc_bars.proto` |
 
 ---
 
@@ -449,8 +450,7 @@ password is logged and the previous Cognito session is kept.
 
 ## 13. Linux server (systemd)
 
-Recommended: one long-running process with `Restart=always`. Do not use the
-old oneshot timer / cron recipes that ran `investigation/poc-log-maxvol.js`.
+Recommended: one long-running process with `Restart=always`.
 
 ### 13.1 User, clone, dependencies
 
@@ -624,31 +624,23 @@ ONCE=1 npm start
 
 ---
 
-## 19. Investigation scripts (optional)
+## 19. Shareable zip
 
-You do **not** need these to scrape. They reverse-engineered the protocol
-([`investigation/FINDINGS.md`](investigation/FINDINGS.md)).
-
-The older single-symbol PoC is `investigation/poc-log-maxvol.js` (its own
-`package.json`, still wants `GOCHARTING_EMAIL` in env). Do not deploy that
-on the VPS.
-
-| Script | Role |
-| --- | --- |
-| `src/index.js` | **Production scraper** (this guide) |
-| `investigation/poc-log-maxvol.js` | Legacy one-symbol PoC |
-| `investigation/investigate.js` | Login + dump HTTP / WS / console |
-| `investigation/capture-frames.js` | Save binary WS frames |
-| `investigation/decode-frames.js` | Decode saved frames with `footprint.proto` |
-
-`investigation/out/` is gitignored (captures can contain JWTs). Never commit
-it. Playwright Chromium is only for those capture scripts:
+To hand someone a runnable copy **without git or the source tree**:
 
 ```bash
-cd investigation
 npm ci
-npx playwright install --with-deps chromium
+npm run pack
 ```
+
+That writes `dist/go-charting-scraper-<version>.zip`. esbuild bundles the
+`npm start` graph (no `*.test.js`) into one `index.js`. The zip also includes
+`package.json`, a production `package-lock.json`, `start.bat` /
+`start-once.bat`, `.env.example`, `WINDOWS.md`, `proto/`, and — if they exist
+in the current working tree — `.env` and `google-service-account.json`.
+
+The recipient unzips, runs `npm ci --omit=dev` (or double-clicks `start.bat`),
+then `npm start`. Treat that zip as secret if it contains `.env`.
 
 ---
 

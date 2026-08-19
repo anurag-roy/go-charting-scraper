@@ -31,7 +31,7 @@ if not exist ".env" (
 
 if not exist "node_modules\" (
   echo First run: installing dependencies with npm ci ...
-  call npm ci
+  call npm ci --omit=dev
   if errorlevel 1 (
     echo npm ci failed. Check the messages above, then try again.
     echo.
@@ -40,12 +40,23 @@ if not exist "node_modules\" (
   )
 )
 
+set "ENTRY="
+if exist "src\index.js" set "ENTRY=src\index.js"
+if not defined ENTRY if exist "index.js" set "ENTRY=index.js"
+if not defined ENTRY (
+  echo Could not find src\index.js or index.js in:
+  echo   %CD%
+  echo.
+  pause
+  exit /b 1
+)
+
 echo.
 echo Keep this window open while you want candles collected.
 echo Sleep, closing the lid, or closing this window will stop the scraper.
 echo When you are done for the day, press Ctrl+C, then you can shut the PC down.
 echo.
-node src\index.js
+node "%ENTRY%"
 echo.
 echo Scraper stopped.
 pause

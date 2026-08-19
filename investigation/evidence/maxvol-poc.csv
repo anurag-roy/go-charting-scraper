@@ -1,4 +1,0 @@
-sampled_at_utc,sampled_at_ist,sample_n,interval,symbol,candle_time,open,high,low,close,ohlc_volume,max_vol_b,max_vol_s,max_vol_b_level,max_vol_s_level,totals_buy,totals_sell,price_levels,recomputed_max_b,recomputed_max_s,values_match,candles_in_response,ok,error
-2026-08-14T18:03:23.932Z,2026-08-14T23:33:23+05:30,1,5m,MCX:FUTURE:CRUDEOIL-I,2026-08-14T23:25:00+05:30,7876,7880,7871,7878,337,50,96,7876,7874,141,196,10,50,96,true,174,true,
-2026-08-14T18:03:23.932Z,2026-08-14T23:33:23+05:30,1,10m,MCX:FUTURE:CRUDEOIL-I,2026-08-14T23:20:00+05:30,7872,7880,7870,7878,635,66,97,7876,7874,292,343,11,66,97,true,87,true,
-2026-08-14T18:03:23.932Z,2026-08-14T23:33:23+05:30,1,15m,MCX:FUTURE:CRUDEOIL-I,2026-08-14T23:15:00+05:30,7869,7880,7863,7878,831,71,97,7875,7874,409,422,18,71,97,true,58,true,

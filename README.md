@@ -9,8 +9,7 @@ Handing this to a client on a **Windows laptop** that is powered on each
 morning (not left on 24×7): [`WINDOWS.md`](WINDOWS.md).
 
 GoCharting login is AWS Cognito over HTTPS (no browser). Market data is the
-WebSocket + Protobuf protocol documented in
-[`investigation/FINDINGS.md`](investigation/FINDINGS.md).
+WebSocket + Protobuf protocol; schemas live in [`src/proto/`](src/proto/).
 
 ## What it does
 
@@ -82,6 +81,7 @@ npm ci
 npm start              # 24x7
 ONCE=1 npm start       # one config read + one sample, then exit
 npm test
+npm run pack           # dist/go-charting-scraper-<version>.zip (no git / tests)
 ```
 
 On Windows, do not use `ONCE=1 npm start` in Command Prompt. Double-click
@@ -100,5 +100,15 @@ Windows PC that is not on 24×7: [`WINDOWS.md`](WINDOWS.md) (double-click
 ## Protocol notes
 
 The live path does not open a browser. Intervals are requested as `FOOTPRINT/V2`
-and `TS/V2` `OHLCV/V2`. Reverse-engineering notes and capture scripts remain
-under [`investigation/`](investigation/).
+and `TS/V2` `OHLCV/V2`. Decoder schemas are [`src/proto/footprint.proto`](src/proto/footprint.proto)
+and [`src/proto/ohlc_bars.proto`](src/proto/ohlc_bars.proto).
+
+## Shareable zip
+
+`npm run pack` bundles the `npm start` graph (no tests) with esbuild into one
+`index.js`, then zips it with `package.json`, `package-lock.json`, `start.bat`,
+`start-once.bat`, `.env.example`, the proto files, and — if they exist on this
+machine — `.env` and `google-service-account.json`. Recipients unzip, run
+`npm ci --omit=dev` (or double-click `start.bat`), and do not need git or the
+source tree. That zip includes secrets when those files were present, so treat
+it like `.env`.
