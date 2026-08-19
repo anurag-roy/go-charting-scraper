@@ -129,7 +129,7 @@ describe('SheetsSink', () => {
     assert.equal(sink.loadedTabs.has(oldTab), false);
   });
 
-  it('retainSession drops previous-day rows and keeps today's current-schema values', async () => {
+  it('retainSession drops previous-day rows and keeps today on the current schema', async () => {
     const tab = sheetTabName('NIFTY-I', '2m');
     const today = [
       '2026-08-18T09:15:00', 100, 110, 99, 105, 8, 9, 10, 11, 12, 13, 14, 20.2,
