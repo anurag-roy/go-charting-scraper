@@ -139,12 +139,12 @@ export class OhlcCollector {
 }
 
 export class FootprintClient {
-  constructor({ FP, OHLC, session = 'RTH', intervals = ['2m', '3m', '5m'], log, dbg } = {}) {
+  constructor({ FP, OHLC, session = 'RTH', intervals = [], log, dbg } = {}) {
     this.wsUrl = '';
     this.FP = FP;
     this.OHLC = OHLC;
     this.sessionType = session;
-    this.intervals = intervals;
+    this.intervals = [...intervals];
     this.log = log;
     this.dbg = dbg || (() => {});
     this.ohlcCollector = new OhlcCollector(OHLC);
@@ -393,6 +393,16 @@ export class FootprintClient {
     return last;
   }
 
+  #ohlcIdx(interval) {
+    const iv = String(interval || '').trim();
+    let i = this.intervals.indexOf(iv);
+    if (i < 0) {
+      this.intervals.push(iv);
+      i = this.intervals.length - 1;
+    }
+    return i;
+  }
+
   requestOhlc(instrument, interval, timeoutMs = 12_000) {
     const request_id = this.nextId++;
     const symbolKey = symbolId(instrument);
@@ -422,7 +432,7 @@ export class FootprintClient {
           interval,
           session: this.sessionType,
           hint: 'rows=500',
-          idxs: [Math.max(0, this.intervals.indexOf(interval))],
+          idxs: [this.#ohlcIdx(interval)],
         },
       });
     });

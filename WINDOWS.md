@@ -35,8 +35,8 @@ If you only need the operator/VPS version of this project, use
 ## 1. What you get
 
 The scraper signs in to GoCharting (no browser window), reads the instruments
-on the Google Sheet `config` tab, and writes **closed** 2-minute, 3-minute,
-and 5-minute footprint candles back into that same spreadsheet.
+and candle timeframes on the Google Sheet `config` tab, and writes **closed**
+footprint candles back into that same spreadsheet.
 
 | Sheet column | Meaning |
 | --- | --- |
@@ -54,8 +54,8 @@ The candle that is still forming is **not** written. After a bar ends, the
 process waits about 2 seconds, then appends the row. Restarts skip times
 already on that tab, so starting twice does not duplicate rows.
 
-Each instrument gets three tabs named from the **symbol only**, for example
-`NIFTY-I 2m`, `NIFTY-I 3m`, `NIFTY-I 5m`.
+Each instrument gets one tab per configured timeframe, named from the
+**symbol only**, for example `NIFTY-I 2m`, `NIFTY-I 5m`.
 
 ---
 
@@ -199,19 +199,22 @@ A UTF-16 save from Notepad will break startup.
 ### 5.3 Confirm the Google Sheet `config` tab
 
 Open the spreadsheet you were given. There must be a tab named exactly
-**`config`**, with labels in column A and values in column B:
+**`config`**, with labels in column A, the login / instrument id in column B,
+and candle timeframes in columns C onward:
 
-| A | B (example) |
-| --- | --- |
-| email | Your GoCharting login email |
-| password | Your GoCharting password |
-| Instrument1 | `NSE:FUTURE:NIFTY-I` |
-| Instrument2 | `MCX:FUTURE:CRUDEOIL-I` |
-| Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` |
+| A | B (example) | C | D | E |
+| --- | --- | --- | --- | --- |
+| email | Your GoCharting login email | | | |
+| password | Your GoCharting password | | | |
+| Instrument1 | `NSE:FUTURE:NIFTY-I` | `2m` | `3m` | `5m` |
+| Instrument2 | `MCX:FUTURE:CRUDEOIL-I` | `5m` | `10m` | |
+| Instrument3 | `NSE:OPTIONS:NIFTY2681824300CE` | `2m` | `3m` | `5m` |
 
-Blank instrument rows are ignored. You can run one, two, or three symbols.
+Blank instrument rows are ignored. You can run one, two, or six symbols.
 Instrument strings look like `EXCHANGE:CATEGORY:SYMBOL` (`NSE`, `BSE`, or
-`MCX`). Slashes (`NSE/FUTURE/NIFTY-I`) also work.
+`MCX`). Slashes (`NSE/FUTURE/NIFTY-I`) also work. Timeframes are minute bars
+such as `2m` or `10m`. If a row has a symbol but no timeframes, that
+instrument is skipped — there is no default list.
 
 The password is **plaintext on the sheet**. Share the file only with people
 who should have that GoCharting login.
@@ -237,7 +240,7 @@ Allow it for this folder.
 ## 6. First successful run (smoke test)
 
 Do this once, any time you have internet. It reads `config`, logs in,
-creates any missing `{symbol} 2m/3m/5m` tabs, writes already-closed candles
+creates any missing `{symbol} {interval}` tabs, writes already-closed candles
 for the current (or last weekday) session, then **exits**.
 
 Double-click **`start-once.bat`**, or in a terminal:
@@ -353,10 +356,11 @@ Set it back to your usual minutes when you are done (for example `30`).
 Edit the `config` tab on the Google Sheet. You do **not** restart the
 scraper.
 
-- Change `Instrument1` / `Instrument2` / `Instrument3` → within about 5
-  seconds the process switches symbols, creates new tabs if needed, and
-  backfills the new symbol for the current (or last weekday) session. Old
-  symbol tabs are **left in place**.
+- Change `Instrument1` / `Instrument2` / `Instrument3` (symbol or timeframes)
+  → within about 5 seconds the process switches symbols / intervals, creates
+  new tabs if needed, and backfills the new symbol (or newly added
+  timeframes) for the current (or last weekday) session. Old symbol tabs are
+  **left in place**.
 - Change email/password → the new login is tried first. A bad password is
   logged; the previous working session is kept.
 
@@ -370,7 +374,7 @@ the handover unless the spreadsheet or service account is replaced.
 | Check | Healthy sign |
 | --- | --- |
 | Scraper window | New `INFO sample N …` lines about every 15 seconds during market hours |
-| Google Sheet | New rows on `{symbol} 2m` / `3m` / `5m` after each bar closes |
+| Google Sheet | New rows on `{symbol} {interval}` tabs after each bar closes |
 | `logs\status.json` | `"ws": "open"` during the session; `instruments` matches `config` |
 | `logs\error.log` | Empty, or only old errors you already fixed |
 
@@ -386,7 +390,7 @@ can still appear in `status.json`.
 | `node` is not recognized | Node.js not installed, or terminal opened before install | Reinstall Node 22 LTS with PATH checked. Close all terminals and try again. |
 | `set GOOGLE_SHEET_ID` (process exits) | `.env` missing or not in the project folder | Place `.env` next to `package.json`. Use the full sheet URL or the id from the URL. |
 | `Google credentials are missing` / file not found | JSON path wrong, or PEM not pasted | Put `google-service-account.json` in the project folder, or fix `GOOGLE_CLIENT_EMAIL` / `GOOGLE_PRIVATE_KEY`. |
-| `config sheet is missing email, password, or instruments` | Tab name or cells | Tab must be `config`. Labels in A, values in B. |
+| `config sheet is missing email, password, or instruments with candle timeframes` | Tab name or cells | Tab must be `config`. Labels in A, symbol in B, timeframes in C onward. |
 | `cognito auth failed` / `NotAuthorizedException` | Wrong GoCharting password on the sheet | Fix the `config` email/password. There is no login window. |
 | `ws unexpected HTTP 401` / connect timeout | JWT rejected, or office network blocking WSS | Confirm internet. Try without VPN. Allow outbound `origin.ws.prodb.blr1.gocharting.com`. |
 | Window was working, then it froze and the sheet stopped | PC slept or Wi‑Fi dropped | Follow [§9](#9-keep-the-laptop-awake). Start `start.bat` again; duplicates are skipped. |

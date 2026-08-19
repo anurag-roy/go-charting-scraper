@@ -62,7 +62,7 @@ export class ConfigSheet {
     const res = await withRetry(
       () => this.sheetsApi.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: sheetA1(this.tab, 'A1:B50'),
+        range: sheetA1(this.tab, 'A1:Z100'),
       }),
       retryOpts(this.log, 'config read'),
     );

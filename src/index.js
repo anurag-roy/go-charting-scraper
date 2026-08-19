@@ -60,7 +60,6 @@ export async function main() {
     FP,
     OHLC,
     session: cfg.session,
-    intervals: cfg.intervals,
     log,
   });
 

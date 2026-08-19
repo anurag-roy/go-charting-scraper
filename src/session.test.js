@@ -14,10 +14,11 @@ import {
 const SESSION = { open: '09:15', close: '15:40', graceMs: 2000 };
 
 describe('intervalMinutes', () => {
-  it('parses 2m/3m/5m', () => {
+  it('parses minute bars including 10m', () => {
     assert.equal(intervalMinutes('2m'), 2);
     assert.equal(intervalMinutes('3m'), 3);
     assert.equal(intervalMinutes('5m'), 5);
+    assert.equal(intervalMinutes('10m'), 10);
   });
 });
 

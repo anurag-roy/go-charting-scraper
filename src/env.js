@@ -41,11 +41,6 @@ function normalizePrivateKey(raw) {
 }
 
 export function loadConfig() {
-  const intervals = String(process.env.INTERVALS || '2m,3m,5m')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-
   const sheetId = parseSheetId(process.env.GOOGLE_SHEET_ID || process.env.GOOGLE_SHEET_URL || '');
   const credRaw = String(
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS || '',
@@ -70,7 +65,6 @@ export function loadConfig() {
     configTab: String(process.env.CONFIG_TAB || 'config').trim() || 'config',
     configPollMs: Number(process.env.CONFIG_POLL_MS || 5_000),
     sampleMs: Number(process.env.SAMPLE_MS || 15_000),
-    intervals,
     session: process.env.GOCHARTING_SESSION || 'RTH',
     closeGraceMs: Number(process.env.CLOSE_GRACE_MS || 2000),
     afterCloseBufferMs: Number(process.env.AFTER_CLOSE_BUFFER_MS || 60_000),
@@ -104,7 +98,6 @@ export function validateConfig(cfg) {
   if (cfg.sheetId && cfg.googleCredentialsPath && !cfg.googleCredentialsJson && !fs.existsSync(cfg.googleCredentialsPath)) {
     errors.push(`Google credentials file not found: ${cfg.googleCredentialsPath}`);
   }
-  if (!cfg.intervals.length) errors.push('INTERVALS is empty');
   if (!Number.isFinite(cfg.configPollMs) || cfg.configPollMs < 1000) {
     errors.push('CONFIG_POLL_MS must be at least 1000');
   }
