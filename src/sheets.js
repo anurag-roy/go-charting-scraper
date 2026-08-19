@@ -1,15 +1,21 @@
 import { google } from 'googleapis';
 import {
   SHEET_COLUMNS,
+  STATIC_INTERVAL_LETTERS,
+  TAB_IDENTITY_CELL,
+  allStaticTabNames,
+  identityFromHeader,
   mapSheetRow,
   rowToSheetValues,
   selectNewSheetRows,
   sheetCandleDate,
   sheetRowKey,
   sheetTabName,
+  sheetTabNamesFor,
   shouldRewriteHeader,
+  tabIdentity,
 } from './columns.js';
-import { parseConfigRows } from './instruments.js';
+import { MAX_INSTRUMENTS, instrumentIntervals, parseConfigRows } from './instruments.js';
 import { withRetry } from './util.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
@@ -88,30 +94,59 @@ export class SheetsSink {
     this.log = log;
     this.keys = new Set();
     this.loadedTabs = new Set();
+    this.boundIdentity = new Map();
+    this.staticTabsReady = false;
   }
 
   tabForRow(row) {
-    return sheetTabName(row.contract, row.interval);
+    const ivs = Array.isArray(row?.intervals) ? row.intervals : [];
+    return sheetTabName(row?.slot, ivs.indexOf(row?.interval));
   }
 
-  dropInstrument(contract, intervals) {
-    for (const iv of intervals || []) {
-      const tab = sheetTabName(contract, iv);
-      this.loadedTabs.delete(tab);
-      for (const k of [...this.keys]) {
-        if (k.startsWith(`${tab}\t`)) this.keys.delete(k);
-      }
+  #forgetTab(tab) {
+    if (!tab) return;
+    this.loadedTabs.delete(tab);
+    this.boundIdentity.delete(tab);
+    for (const k of [...this.keys]) {
+      if (k.startsWith(`${tab}\t`)) this.keys.delete(k);
     }
   }
 
-  async ensureInstrument(contract, intervals) {
-    const tabs = (intervals || []).map((iv) => sheetTabName(contract, iv)).filter(Boolean);
+  dropInstrument(instrument) {
+    for (const tab of sheetTabNamesFor(instrument)) this.#forgetTab(tab);
+  }
+
+  async ensureStaticTabs() {
+    if (this.staticTabsReady) return;
+    const tabs = allStaticTabNames(MAX_INSTRUMENTS, STATIC_INTERVAL_LETTERS);
     await this.#ensureTabs(tabs);
     for (const tab of tabs) {
-      if (!this.loadedTabs.has(tab)) {
-        await this.#ensureHeaderAndLoadKeys(tab);
-        this.loadedTabs.add(tab);
+      const res = await withRetry(
+        () => this.sheetsApi.spreadsheets.values.get({
+          spreadsheetId: this.spreadsheetId,
+          range: sheetA1(tab, 'A1:M1'),
+        }),
+        retryOpts(this.log, `header ${tab}`),
+      );
+      const header = res.data.values?.[0] || [];
+      if (!header.length || shouldRewriteHeader(header, SHEET_COLUMNS)) {
+        await this.#writeHeader(tab);
       }
+    }
+    this.staticTabsReady = true;
+  }
+
+  async ensureInstrument(instrument) {
+    const ivs = instrumentIntervals(instrument);
+    const tabs = sheetTabNamesFor(instrument);
+    await this.#ensureTabs(tabs);
+    for (let i = 0; i < tabs.length; i += 1) {
+      const tab = tabs[i];
+      const expected = tabIdentity(instrument.slot, ivs[i], instrument.id);
+      if (this.loadedTabs.has(tab) && this.boundIdentity.get(tab) === expected) continue;
+      await this.#ensureHeaderAndLoadKeys(tab, expected);
+      this.loadedTabs.add(tab);
+      this.boundIdentity.set(tab, expected);
     }
   }
 
@@ -120,8 +155,9 @@ export class SheetsSink {
    * Also rewrites a legacy `vwap1`/`vwap2` header to `vwap`.
    * Returns how many data rows were removed.
    */
-  async retainSession(contract, intervals, dateStr) {
-    const tabs = (intervals || []).map((iv) => sheetTabName(contract, iv)).filter(Boolean);
+  async retainSession(instrument, dateStr) {
+    const ivs = instrumentIntervals(instrument);
+    const tabs = ivs.map((_, i) => sheetTabName(instrument.slot, i)).filter(Boolean);
     await this.#ensureTabs(tabs);
     let dropped = 0;
     for (const tab of tabs) {
@@ -169,6 +205,29 @@ export class SheetsSink {
     );
   }
 
+  async #writeIdentity(tab, identity) {
+    await withRetry(
+      () => this.sheetsApi.spreadsheets.values.update({
+        spreadsheetId: this.spreadsheetId,
+        range: sheetA1(tab, TAB_IDENTITY_CELL),
+        valueInputOption: 'RAW',
+        requestBody: { values: [[identity || '']] },
+      }),
+      retryOpts(this.log, `identity ${tab}`),
+    );
+  }
+
+  async #clearTabData(tab) {
+    await withRetry(
+      () => this.sheetsApi.spreadsheets.values.clear({
+        spreadsheetId: this.spreadsheetId,
+        range: sheetA1(tab, 'A2:Z'),
+      }),
+      retryOpts(this.log, `clear ${tab}`),
+    );
+    this.#replaceTabKeys(tab, []);
+  }
+
   #replaceTabKeys(tab, times) {
     for (const k of [...this.keys]) {
       if (k.startsWith(`${tab}\t`)) this.keys.delete(k);
@@ -178,7 +237,7 @@ export class SheetsSink {
     }
   }
 
-  async #ensureHeaderAndLoadKeys(tab) {
+  async #ensureHeaderAndLoadKeys(tab, expectedIdentity) {
     const res = await withRetry(
       () => this.sheetsApi.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
@@ -187,19 +246,33 @@ export class SheetsSink {
       retryOpts(this.log, `read ${tab}`),
     );
     const values = res.data.values || [];
+    const expected = expectedIdentity == null ? null : String(expectedIdentity);
     if (!values.length) {
       await this.#writeHeader(tab);
+      if (expected != null) await this.#writeIdentity(tab, expected);
+      this.#replaceTabKeys(tab, []);
       return;
     }
     const header = values[0] || [];
+    const stored = identityFromHeader(header);
+    if (expected != null && stored !== expected) {
+      this.log?.info(`overwriting ${tab}`, { from: stored || '(empty)', to: expected || '(vacant)' });
+      if (shouldRewriteHeader(header, SHEET_COLUMNS) || !header.length) await this.#writeHeader(tab);
+      await this.#writeIdentity(tab, expected);
+      await this.#clearTabData(tab);
+      return;
+    }
     if (shouldRewriteHeader(header, SHEET_COLUMNS)) {
       await this.#writeHeader(tab);
+      if (stored || expected) await this.#writeIdentity(tab, expected != null ? expected : stored);
     }
     const iTime = header.indexOf('candle_time');
+    const times = [];
     for (const row of values.slice(1)) {
       const t = iTime >= 0 ? row[iTime] : '';
-      if (t) this.keys.add(sheetRowKey(tab, t));
+      if (t) times.push(t);
     }
+    this.#replaceTabKeys(tab, times);
   }
 
   async #retainTabDate(tab, dateStr) {
@@ -256,7 +329,8 @@ export class SheetsSink {
   async #reloadTabKeys(tab) {
     this.#replaceTabKeys(tab, []);
     this.loadedTabs.delete(tab);
-    await this.#ensureHeaderAndLoadKeys(tab);
+    const expected = this.boundIdentity.has(tab) ? this.boundIdentity.get(tab) : undefined;
+    await this.#ensureHeaderAndLoadKeys(tab, expected);
     this.loadedTabs.add(tab);
   }
 

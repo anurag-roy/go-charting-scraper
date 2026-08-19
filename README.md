@@ -24,13 +24,15 @@ WebSocket + Protobuf protocol documented in
    …). There is no default list: if a row has a symbol but no timeframes, that
    instrument is skipped. If only `5m` and `10m` are listed, only those bars
    are requested.
-4. For each configured timeframe, writes **closed** candles to a tab named
-   `{symbol} {interval}` — for example `NIFTY2681824300CE 2m`. Forming bars are
-   never written. Each tab keeps **only the current IST day’s rows**;
-   previous-day candles are deleted in the morning.
-5. If an instrument changes from X to Y, or its timeframes change, monitoring
-   switches and new tabs are created. Old tabs are left in place. Y is
-   backfilled for **today’s** session only (not previous weekdays).
+4. Writes **closed** candles to **static** tabs named from the config slot and
+   timeframe letter: `Instrument1` → `1A`, `1B`, `1C`, `Instrument2` → `2A`,
+   `2B`, `2C`, and so on (column C → A, D → B, E → C). Forming bars are never
+   written. Each tab keeps **only the current IST day’s rows**; previous-day
+   candles are deleted in the morning.
+5. If you change a slot’s symbol or timeframes during the session, those same
+   tabs are **overwritten** (the sheet names never change, and sheets are never
+   deleted). The new symbol/timeframe is backfilled for **today’s** session
+   only.
 6. Stays running overnight and on weekends. NSE/BSE are sampled 09:15–15:40
    IST; MCX energy-style contracts 09:00–23:30 IST (23:55 while US Eastern is
    on daylight saving). Outside those windows the websocket is closed.
@@ -57,7 +59,7 @@ who should have that login, plus the service account.
 
 ## Candle columns
 
-Each `{symbol} {interval}` tab uses this schema:
+Each static tab (`1A`, `1B`, `1C`, …) uses this schema:
 
 | Column | Meaning |
 | --- | --- |

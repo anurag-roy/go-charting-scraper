@@ -18,8 +18,8 @@ function mockAuth() {
   };
 }
 
-function inst(raw, intervals) {
-  return { ...parseInstrumentId(raw), intervals };
+function inst(raw, intervals, slot = 1) {
+  return { ...parseInstrumentId(raw), intervals, slot };
 }
 
 function baseCfg() {
@@ -35,16 +35,21 @@ function baseCfg() {
 }
 
 describe('Supervisor instrument hot-swap', () => {
-  it('creates Y tabs, drops X from memory, and does not delete X sheets', async () => {
+  it('overwrites the same slot tabs and does not delete sheets', async () => {
     const created = [];
     const dropped = [];
     const deletedSheets = [];
     const sink = {
-      async ensureInstrument(symbol, intervals) {
-        created.push({ symbol, intervals: [...intervals] });
+      async ensureStaticTabs() {},
+      async ensureInstrument(instrument) {
+        created.push({
+          slot: instrument.slot,
+          symbol: instrument.symbol,
+          intervals: [...instrument.intervals],
+        });
       },
-      dropInstrument(symbol, intervals) {
-        dropped.push({ symbol, intervals: [...intervals] });
+      dropInstrument(instrument) {
+        dropped.push({ slot: instrument.slot, symbol: instrument.symbol });
       },
       async retainSession() { return 0; },
       async writeRows() { return 0; },
@@ -65,26 +70,27 @@ describe('Supervisor instrument hot-swap', () => {
       now: () => Date.parse('2026-08-17T10:00:00+05:30'),
     });
 
-    const x = inst('NSE:FUTURE:NIFTY-I', ['2m', '3m', '5m']);
-    const y = inst('NSE:OPTIONS:NIFTY2681824300CE', ['2m', '3m', '5m']);
+    const x = inst('NSE:FUTURE:NIFTY-I', ['2m', '3m', '5m'], 1);
+    const y = inst('NSE:OPTIONS:NIFTY2681824300CE', ['2m', '3m', '5m'], 1);
     await supervisor.reconcile([x]);
     await supervisor.reconcile([y]);
 
     assert.deepEqual(created.map((c) => c.symbol), ['NIFTY-I', 'NIFTY2681824300CE']);
+    assert.deepEqual(created.map((c) => c.slot), [1, 1]);
     assert.deepEqual(created[0].intervals, ['2m', '3m', '5m']);
     assert.deepEqual(dropped.map((d) => d.symbol), ['NIFTY-I']);
-    assert.deepEqual(dropped[0].intervals, ['2m', '3m', '5m']);
     assert.deepEqual(deletedSheets, []);
     assert.deepEqual(supervisor.liveInstruments.map((i) => i.id), [y.id]);
-    assert.equal(supervisor.instrumentState.has(x.id), false);
-    assert.equal(supervisor.instrumentState.has(y.id), true);
-    assert.equal(supervisor.instrumentState.get(y.id).backfilledSessionDate, null);
-    assert.equal(sheetTabName(y.symbol, '2m'), 'NIFTY2681824300CE 2m');
+    assert.equal(supervisor.instrumentState.has(x.slot), true);
+    assert.equal(supervisor.instrumentState.get(y.slot).backfilledSessionDate, null);
+    assert.equal(sheetTabName(y.slot, 0), '1A');
+    assert.equal(sheetTabName(y.slot, 2), '1C');
   });
 
   it('backfills a newly added instrument immediately', async () => {
     const requested = [];
     const sink = {
+      async ensureStaticTabs() {},
       async ensureInstrument() {},
       dropInstrument() {},
       async retainSession() { return 0; },
@@ -123,12 +129,12 @@ describe('Supervisor instrument hot-swap', () => {
       now: () => Date.parse('2026-08-17T10:00:00+05:30'),
     });
     supervisor.liveConfig = { email: 'a@b.c', password: 'pw' };
-    const y = inst('MCX:FUTURE:CRUDEOIL-I', ['2m']);
+    const y = inst('MCX:FUTURE:CRUDEOIL-I', ['2m'], 2);
     await supervisor.reconcile([y]);
     const wrote = await supervisor.sampleDue(true);
     assert.ok(requested.includes('MCX:FUTURE:CRUDEOIL-I:2m'));
     assert.equal(wrote > 0, true);
-    assert.equal(supervisor.instrumentState.get(y.id).backfilledSessionDate, '2026-08-17');
+    assert.equal(supervisor.instrumentState.get(y.slot).backfilledSessionDate, '2026-08-17');
   });
 
   it('requests only the timeframes listed on each instrument', async () => {
@@ -139,8 +145,9 @@ describe('Supervisor instrument hot-swap', () => {
       log: silentLog(),
       configSheet: { read: async () => ({}) },
       sink: {
-        async ensureInstrument(symbol, intervals) {
-          created.push({ symbol, intervals: [...intervals] });
+        async ensureStaticTabs() {},
+        async ensureInstrument(instrument) {
+          created.push({ slot: instrument.slot, symbol: instrument.symbol, intervals: [...instrument.intervals] });
         },
         dropInstrument() {},
         async retainSession() { return 0; },
@@ -163,13 +170,13 @@ describe('Supervisor instrument hot-swap', () => {
       now: () => Date.parse('2026-08-17T10:00:00+05:30'),
     });
     supervisor.liveConfig = { email: 'a@b.c', password: 'pw' };
-    const nifty = inst('NSE:FUTURE:NIFTY-I', ['5m', '10m']);
-    const crude = inst('MCX:FUTURE:CRUDEOIL-I', ['15m']);
+    const nifty = inst('NSE:FUTURE:NIFTY-I', ['5m', '10m'], 1);
+    const crude = inst('MCX:FUTURE:CRUDEOIL-I', ['15m'], 2);
     await supervisor.reconcile([nifty, crude]);
     await supervisor.sampleDue(true);
     assert.deepEqual(created, [
-      { symbol: 'NIFTY-I', intervals: ['5m', '10m'] },
-      { symbol: 'CRUDEOIL-I', intervals: ['15m'] },
+      { slot: 1, symbol: 'NIFTY-I', intervals: ['5m', '10m'] },
+      { slot: 2, symbol: 'CRUDEOIL-I', intervals: ['15m'] },
     ]);
     assert.deepEqual(requested.sort(), [
       'MCX:FUTURE:CRUDEOIL-I:15m',
@@ -186,8 +193,9 @@ describe('Supervisor instrument hot-swap', () => {
       log: silentLog(),
       configSheet: { read: async () => ({}) },
       sink: {
-        async ensureInstrument(symbol, intervals) {
-          created.push({ symbol, intervals: [...intervals] });
+        async ensureStaticTabs() {},
+        async ensureInstrument(instrument) {
+          created.push({ slot: instrument.slot, symbol: instrument.symbol, intervals: [...instrument.intervals] });
         },
         dropInstrument() {},
         async retainSession() { return 0; },
@@ -210,14 +218,14 @@ describe('Supervisor instrument hot-swap', () => {
       now: () => Date.parse('2026-08-17T10:00:00+05:30'),
     });
     supervisor.liveConfig = { email: 'a@b.c', password: 'pw' };
-    await supervisor.reconcile([inst('NSE:FUTURE:NIFTY-I', [])]);
+    await supervisor.reconcile([inst('NSE:FUTURE:NIFTY-I', [], 1)]);
     const wrote = await supervisor.sampleDue(true);
-    assert.deepEqual(created, [{ symbol: 'NIFTY-I', intervals: [] }]);
+    assert.deepEqual(created, [{ slot: 1, symbol: 'NIFTY-I', intervals: [] }]);
     assert.deepEqual(requested, []);
     assert.equal(wrote, 0);
   });
 
-  it('hot-swaps timeframes on a kept instrument without deleting old tabs', async () => {
+  it('hot-swaps timeframes on a slot and overwrites those tabs', async () => {
     const created = [];
     const dropped = [];
     const supervisor = new Supervisor({
@@ -225,11 +233,12 @@ describe('Supervisor instrument hot-swap', () => {
       log: silentLog(),
       configSheet: { read: async () => ({}) },
       sink: {
-        async ensureInstrument(symbol, intervals) {
-          created.push({ symbol, intervals: [...intervals] });
+        async ensureStaticTabs() {},
+        async ensureInstrument(instrument) {
+          created.push({ slot: instrument.slot, symbol: instrument.symbol, intervals: [...instrument.intervals] });
         },
-        dropInstrument(symbol, intervals) {
-          dropped.push({ symbol, intervals: [...intervals] });
+        dropInstrument(instrument) {
+          dropped.push({ slot: instrument.slot, symbol: instrument.symbol, intervals: [...instrument.intervals] });
         },
         async retainSession() { return 0; },
         async writeRows() { return 0; },
@@ -239,33 +248,34 @@ describe('Supervisor instrument hot-swap', () => {
       now: () => Date.parse('2026-08-17T10:00:00+05:30'),
     });
 
-    const first = inst('NSE:FUTURE:NIFTY-I', ['2m', '3m', '5m']);
-    const next = inst('NSE:FUTURE:NIFTY-I', ['5m', '10m']);
+    const first = inst('NSE:FUTURE:NIFTY-I', ['2m', '3m', '5m'], 1);
+    const next = inst('NSE:FUTURE:NIFTY-I', ['5m', '10m'], 1);
     await supervisor.reconcile([first]);
     await supervisor.reconcile([next]);
 
     assert.deepEqual(created, [
-      { symbol: 'NIFTY-I', intervals: ['2m', '3m', '5m'] },
-      { symbol: 'NIFTY-I', intervals: ['5m', '10m'] },
+      { slot: 1, symbol: 'NIFTY-I', intervals: ['2m', '3m', '5m'] },
+      { slot: 1, symbol: 'NIFTY-I', intervals: ['5m', '10m'] },
     ]);
-    assert.deepEqual(dropped, [{ symbol: 'NIFTY-I', intervals: ['2m', '3m'] }]);
-    assert.equal(supervisor.instrumentState.get(first.id).backfilledSessionDate, null);
+    assert.deepEqual(dropped, [{ slot: 1, symbol: 'NIFTY-I', intervals: ['5m', '10m'] }]);
+    assert.equal(supervisor.instrumentState.get(first.slot).backfilledSessionDate, null);
     assert.deepEqual(supervisor.liveInstruments[0].intervals, ['5m', '10m']);
   });
 
   it('drops previous-day sheet rows when the IST date changes', async () => {
     const retained = [];
-    const x = inst('NSE:FUTURE:NIFTY-I', ['2m', '3m', '5m']);
+    const x = inst('NSE:FUTURE:NIFTY-I', ['2m', '3m', '5m'], 1);
     let nowMs = Date.parse('2026-08-17T10:00:00+05:30');
     const supervisor = new Supervisor({
       cfg: baseCfg(),
       log: silentLog(),
       configSheet: { read: async () => ({}) },
       sink: {
+        async ensureStaticTabs() {},
         async ensureInstrument() {},
         dropInstrument() {},
-        async retainSession(symbol, intervals, dateStr) {
-          retained.push({ symbol, dateStr, intervals: [...intervals] });
+        async retainSession(instrument, dateStr) {
+          retained.push({ slot: instrument.slot, symbol: instrument.symbol, dateStr, intervals: [...instrument.intervals] });
           return dateStr === '2026-08-18' ? 4 : 0;
         },
         async writeRows() { return 0; },
@@ -278,12 +288,12 @@ describe('Supervisor instrument hot-swap', () => {
     await supervisor.reconcile([x]);
     assert.equal(retained.at(-1).dateStr, '2026-08-17');
     assert.deepEqual(retained.at(-1).intervals, ['2m', '3m', '5m']);
-    assert.equal(supervisor.instrumentState.get(x.id).retainedDate, '2026-08-17');
+    assert.equal(supervisor.instrumentState.get(x.slot).retainedDate, '2026-08-17');
 
     nowMs = Date.parse('2026-08-18T08:00:00+05:30');
     const dropped = await supervisor.retainCurrentDay();
     assert.equal(dropped, 4);
     assert.equal(retained.at(-1).dateStr, '2026-08-18');
-    assert.equal(supervisor.instrumentState.get(x.id).retainedDate, '2026-08-18');
+    assert.equal(supervisor.instrumentState.get(x.slot).retainedDate, '2026-08-18');
   });
 });
