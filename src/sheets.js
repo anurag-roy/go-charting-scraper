@@ -11,7 +11,7 @@ import {
   rowHasOhlc,
   selectSheetWrites,
   sheetCandleDate,
-  sheetRowMissingOhlc,
+  sheetRowNeedsPatch,
   sheetRowKey,
   sheetTabName,
   sheetTabNamesFor,
@@ -285,7 +285,7 @@ export class SheetsSink {
       const t = iTime >= 0 ? row[iTime] : '';
       if (!t) continue;
       times.push(t);
-      if (sheetRowMissingOhlc(header, row)) incompleteTimes.push(t);
+      if (sheetRowNeedsPatch(header, row)) incompleteTimes.push(t);
     }
     this.#replaceTabKeys(tab, times, incompleteTimes);
   }
@@ -340,7 +340,7 @@ export class SheetsSink {
     this.#replaceTabKeys(
       tab,
       mapped.map((row) => row[0]),
-      mapped.filter((row) => sheetRowMissingOhlc(SHEET_COLUMNS, row)).map((row) => row[0]),
+      mapped.filter((row) => sheetRowNeedsPatch(SHEET_COLUMNS, row)).map((row) => row[0]),
     );
     return dropped;
   }
@@ -406,8 +406,8 @@ export class SheetsSink {
         for (const row of stillNew) {
           const k = sheetRowKey(tab, row.candle_time);
           this.keys.add(k);
-          if (rowHasOhlc(row)) this.incompleteKeys.delete(k);
-          else this.incompleteKeys.add(k);
+          if (sheetRowNeedsPatch(SHEET_COLUMNS, rowToSheetValues(row))) this.incompleteKeys.add(k);
+          else this.incompleteKeys.delete(k);
         }
         n += stillNew.length;
       } catch (err) {
@@ -452,7 +452,7 @@ export class SheetsSink {
       const t = formatSheetCandleTime(existing[iTime]);
       const next = wanted.get(t);
       const k = t ? sheetRowKey(tab, t) : '';
-      if (next && sheetRowMissingOhlc(header, existing)) {
+      if (next && sheetRowNeedsPatch(header, existing)) {
         data.push({
           range: sheetA1(tab, `A${i + 2}`),
           values: [rowToSheetValues(next)],
@@ -471,7 +471,7 @@ export class SheetsSink {
       }),
       retryOpts(this.log, `patch ohlc ${tab}`),
     );
-    this.log?.info(`filled missing OHLC on ${tab} (${data.length} row(s))`);
+    this.log?.info(`filled missing cells on ${tab} (${data.length} row(s))`);
     return data.length;
   }
 }

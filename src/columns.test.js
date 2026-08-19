@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   SHEET_COLUMNS,
   formatSheetCandleTime,
+  isFilledOhlcValue,
   isLegacyVwapHeader,
   mapSheetRow,
   rowHasOhlc,
@@ -10,6 +11,7 @@ import {
   selectSheetWrites,
   sheetCandleDate,
   sheetRowMissingOhlc,
+  sheetRowNeedsPatch,
   sheetTabName,
   allStaticTabNames,
   tabIdentity,
@@ -106,6 +108,15 @@ describe('sheet helpers', () => {
     assert.deepEqual(append.map((r) => r.candle_time), ['2026-08-17T09:19:00+05:30']);
     assert.deepEqual(patch.map((r) => r.candle_time), ['2026-08-17T09:15:00+05:30']);
   });
+
+  it('treats a blank max_delta as incomplete even when OHLC is filled', () => {
+    const row = [
+      '2026-08-19T10:25:00', 241280, 241280, 241210, 241214, -3770, '', 1560, 4745, 241250, 12610, -2145, 241467.38,
+    ];
+    assert.equal(sheetRowMissingOhlc(SHEET_COLUMNS, row), false);
+    assert.equal(sheetRowNeedsPatch(SHEET_COLUMNS, row), true);
+    assert.equal(isFilledOhlcValue(0), true);
+  });
 });
 
 describe('SheetsSink', () => {
@@ -135,7 +146,7 @@ describe('SheetsSink', () => {
     };
 
     const n = await sink.writeRows([
-      { ok: true, slot: 1, intervals: ['2m', '3m', '5m'], interval: '2m', candle_time: '2026-08-17T09:15:00+05:30', open: 1, high: 2, low: 1, close: 1.5, delta: 1 },
+      { ok: true, slot: 1, intervals: ['2m', '3m', '5m'], interval: '2m', candle_time: '2026-08-17T09:15:00+05:30', open: 1, high: 2, low: 1, close: 1.5, delta: 1, max_delta: 80 },
       { ok: true, slot: 1, intervals: ['2m', '3m', '5m'], interval: '2m', candle_time: '2026-08-17T09:17:00+05:30', delta: 2 },
       { ok: true, slot: 2, intervals: ['2m', '3m', '5m'], interval: '5m', candle_time: '2026-08-17T09:15:00+05:30', delta: 3 },
     ]);
@@ -208,6 +219,67 @@ describe('SheetsSink', () => {
       '2026-08-17T09:15:00', 100, 110, 99, 105,
     ]);
     assert.equal(sink.incompleteKeys.has(`${tab}\t2026-08-17T09:15:00`), false);
+  });
+
+  it('patches a stored row whose max_delta was left blank because it was 0', async () => {
+    const tab = sheetTabName(1, 2);
+    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
+    sink.loadedTabs.add(tab);
+    sink.keys.add(`${tab}\t2026-08-19T10:25:00`);
+    sink.incompleteKeys.add(`${tab}\t2026-08-19T10:25:00`);
+    const calls = { get: [], batchUpdate: [], append: [] };
+    sink.sheetsApi = {
+      spreadsheets: {
+        values: {
+          get: async () => {
+            calls.get.push(true);
+            return {
+              data: {
+                values: [
+                  SHEET_COLUMNS,
+                  ['2026-08-19T10:25:00', 241280, 241280, 241210, 241214, -3770, '', 1560, 4745, 241250, 12610, -2145, 241467.38],
+                ],
+              },
+            };
+          },
+          batchUpdate: async (req) => {
+            calls.batchUpdate.push(req);
+            return {};
+          },
+          append: async (req) => {
+            calls.append.push(req);
+            return {};
+          },
+        },
+      },
+    };
+
+    const n = await sink.writeRows([
+      {
+        ok: true,
+        slot: 1,
+        intervals: ['2m', '3m', '5m'],
+        interval: '5m',
+        candle_time: '2026-08-19T10:25:00+05:30',
+        open: 241280,
+        high: 241280,
+        low: 241210,
+        close: 241214,
+        delta: -3770,
+        max_delta: 0,
+        max_vol_b: 1560,
+        max_vol_s: 4745,
+        poc: 241250,
+        volume: 12610,
+        oi_change: -2145,
+        vwap: 241467.38,
+      },
+    ]);
+    assert.equal(n, 1);
+    assert.equal(calls.append.length, 0);
+    assert.equal(calls.batchUpdate.length, 1);
+    assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][6], 0);
+    assert.equal(sink.incompleteKeys.has(`${tab}\t2026-08-19T10:25:00`), false);
   });
 
   it('dropInstrument forgets old keys for that slot and leaves other slots', () => {

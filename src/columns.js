@@ -176,6 +176,18 @@ export function sheetRowMissingOhlc(header, values) {
   return !isFilledOhlcValue(open) || !isFilledOhlcValue(close);
 }
 
+export function sheetRowMissingMaxDelta(header, values) {
+  const cols = Array.isArray(header) && header.length ? header : SHEET_COLUMNS;
+  const i = cols.indexOf('max_delta');
+  if (i < 0) return false;
+  return !isFilledOhlcValue(values?.[i]);
+}
+
+/** Rows that should be rewritten on a later sample (blank OHLC and/or blank max_delta). */
+export function sheetRowNeedsPatch(header, values) {
+  return sheetRowMissingOhlc(header, values) || sheetRowMissingMaxDelta(header, values);
+}
+
 export function selectSheetWrites(keys, incompleteKeys, rows, tabForRow) {
   const append = [];
   const patch = [];
