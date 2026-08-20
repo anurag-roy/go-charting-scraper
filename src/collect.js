@@ -2,6 +2,7 @@ import { instrumentIntervals, symbolId } from './instruments.js';
 import { footprintMetrics, oiFields, vwapByCandleTime } from './metrics.js';
 import { isCandleClosed, isPersistableCandle, inSession } from './session.js';
 import { dedupeOhlcBars, findOhlcBar } from './gocharting.js';
+import { elapsedMs, logTiming } from './util.js';
 
 export function candleToRow({
   instrument,
@@ -103,9 +104,11 @@ export async function sampleInstruments({
   sampled_at_utc,
   sampled_at_ist,
   sample_n,
+  log,
 }) {
   const rows = [];
   const summaries = [];
+  const startedAt = Date.now();
   await Promise.all((instruments || []).map(async (instrument) => {
     const ivs = instrumentIntervals(instrument);
     if (!ivs.length) return;
@@ -148,5 +151,11 @@ export async function sampleInstruments({
       });
     }
   }));
+  logTiming(log, 'gocharting sample_fetch', {
+    sample: sample_n,
+    instruments: (instruments || []).length,
+    closed_rows: rows.length,
+    ms: elapsedMs(startedAt),
+  });
   return { rows, summaries };
 }

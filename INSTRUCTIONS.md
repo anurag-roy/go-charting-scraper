@@ -556,6 +556,20 @@ Written under `logs/` in the working directory (gitignored except
 | `logs/status.json` | Last config summary (no password), last sample time, websocket `open`/`closed`. |
 | stdout / `journalctl` | Routine `INFO` / `WARN` lines. |
 
+Every third-party call also emits a grep-friendly `timing …` INFO line (milliseconds wall-clock, including retries and the ~1.2s GoCharting quiet wait):
+
+| Line prefix | When |
+| --- | --- |
+| `timing sheets config_read` | Each `config` tab poll |
+| `timing gocharting FOOTPRINT` / `OHLC` | Each WebSocket request (includes the quiet timeout) |
+| `timing gocharting sample_fetch` | Wall-clock of one sample’s parallel GoCharting pulls |
+| `timing sheets append` / `patch` / `write` | Google write (per tab and total) |
+| `timing sample N` | One sample cycle: `auth_ms`, `ws_ms`, `gocharting_ms`, `sheets_write_ms`, `total_ms` |
+| `timing cognito login` / `refresh` | Only when Cognito is actually called |
+| `timing gocharting ws_connect` | WebSocket handshake |
+
+On Linux: `journalctl -u gocharting-scraper | grep timing`.
+
 The `gocharting` user must be able to write `logs/` (the `chown` in §13.1
 covers that).
 

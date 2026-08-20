@@ -12,7 +12,7 @@ import { earliestOpenMs, workForInstrument } from './market.js';
 import { formatIst, istDateString, sessionDatesFor } from './session.js';
 import { sampleInstruments } from './collect.js';
 import { writeStatus } from './log.js';
-import { interruptibleSleep } from './util.js';
+import { elapsedMs, interruptibleSleep, logTiming } from './util.js';
 import { buildWsUrl } from './cognito.js';
 
 export class Supervisor {
@@ -321,14 +321,21 @@ export class Supervisor {
       const needImmediate = force || due.some((d) => d.work.action === 'backfill') || this.nextSampleAt === 0;
       if (!needImmediate && nowMs < this.nextSampleAt) return 0;
 
+      const t0 = Date.now();
+      const tAuth = Date.now();
       await this.auth.ensure(this.liveConfig.email, this.liveConfig.password);
+      const authMs = elapsedMs(tAuth);
+
+      const tWs = Date.now();
       await this.#ensureWs();
+      const wsMs = elapsedMs(tWs);
 
       this.sampleN += 1;
       const sampled_at_utc = new Date(nowMs).toISOString();
       const sampled_at_ist = formatIst(new Date(nowMs));
       this.log.info(`sample ${this.sampleN}`, due.map((d) => `${d.instrument.id}/${d.work.action}`).join(', '));
 
+      const tGc = Date.now();
       const { rows, summaries } = await sampleInstruments({
         client: this.client,
         instruments: due.map((d) => d.instrument),
@@ -338,7 +345,9 @@ export class Supervisor {
         sampled_at_utc,
         sampled_at_ist,
         sample_n: this.sampleN,
+        log: this.log,
       });
+      const gochartingMs = elapsedMs(tGc);
 
       for (const s of summaries) {
         this.log.info(
@@ -347,6 +356,7 @@ export class Supervisor {
       }
 
       let wrote = 0;
+      const tWrite = Date.now();
       try {
         wrote += await this.sink.writeRows(rows) || 0;
         if (this.csvSink) wrote += this.csvSink.writeRows(rows) || 0;
@@ -354,6 +364,7 @@ export class Supervisor {
         this.log.error('write failed', err);
         throw err;
       }
+      const writeMs = elapsedMs(tWrite);
 
       for (const d of due) {
         const state = this.instrumentState.get(this.#stateKey(d.instrument)) || {};
@@ -365,6 +376,15 @@ export class Supervisor {
       this.nextSampleAt = this.now() + this.cfg.sampleMs;
       this.wsBackoffMs = 1000;
       this.log.info(`wrote ${wrote} new closed-candle row(s)`);
+      logTiming(this.log, `sample ${this.sampleN}`, {
+        auth_ms: authMs,
+        ws_ms: wsMs,
+        gocharting_ms: gochartingMs,
+        sheets_write_ms: writeMs,
+        closed_rows: rows.length,
+        wrote,
+        total_ms: elapsedMs(t0),
+      });
       this.#status({ lastWrote: wrote });
       return wrote;
     });

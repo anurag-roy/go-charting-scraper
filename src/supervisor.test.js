@@ -89,6 +89,7 @@ describe('Supervisor instrument hot-swap', () => {
 
   it('backfills a newly added instrument immediately', async () => {
     const requested = [];
+    const lines = [];
     const sink = {
       async ensureStaticTabs() {},
       async ensureInstrument() {},
@@ -121,7 +122,11 @@ describe('Supervisor instrument hot-swap', () => {
     };
     const supervisor = new Supervisor({
       cfg: baseCfg(),
-      log: silentLog(),
+      log: {
+        info(...args) { lines.push(args.map(String).join(' ')); },
+        warn() {},
+        error() {},
+      },
       configSheet: { read: async () => ({}) },
       sink,
       auth: mockAuth(),
@@ -135,6 +140,8 @@ describe('Supervisor instrument hot-swap', () => {
     assert.ok(requested.includes('MCX:FUTURE:CRUDEOIL-I:2m'));
     assert.equal(wrote > 0, true);
     assert.equal(supervisor.instrumentState.get(y.slot).backfilledSessionDate, '2026-08-17');
+    assert.ok(lines.some((l) => /^timing gocharting sample_fetch sample=1 instruments=1 closed_rows=\d+ ms=\d+$/.test(l)));
+    assert.ok(lines.some((l) => /^timing sample 1 .*gocharting_ms=\d+.*sheets_write_ms=\d+.*total_ms=\d+$/.test(l)));
   });
 
   it('requests only the timeframes listed on each instrument', async () => {

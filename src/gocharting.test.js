@@ -66,4 +66,25 @@ describe('FootprintClient OHLC idxs', () => {
     completeOhlc(client, lastAdd.request_id);
     await p4;
   });
+
+  it('logs FOOTPRINT and OHLC timings when requests finish', async () => {
+    const lines = [];
+    const { client, sent } = openClient();
+    client.log = { info: (s) => lines.push(s) };
+    const nifty = { exchange: 'NSE', segment: 'FUTURE', symbol: 'NIFTY-I' };
+
+    const fp = client.requestOne(nifty, '2m', ['2026-08-17'], 30_000);
+    const pendingFp = [...client.pending.values()].find((p) => p.kind === 'footprint');
+    pendingFp.candles.push({ date: 't' });
+    client.finish(pendingFp.id);
+    await fp;
+
+    const ohlc = client.requestOhlc(nifty, '2m', 30_000);
+    const add = sent.filter((m) => m.action === 'add').at(-1);
+    completeOhlc(client, add.request_id);
+    await ohlc;
+
+    assert.match(lines[0], /^timing gocharting FOOTPRINT symbol=NSE:FUTURE:NIFTY-I interval=2m candles=1 ok=true ms=\d+$/);
+    assert.match(lines[1], /^timing gocharting OHLC symbol=NSE:FUTURE:NIFTY-I interval=2m bars=1 ok=true ms=\d+$/);
+  });
 });

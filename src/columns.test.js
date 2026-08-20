@@ -144,7 +144,11 @@ describe('SheetsSink', () => {
 
   it('appends unseen rows grouped by static slot tabs', async () => {
     const appended = [];
-    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
+    const lines = [];
+    const sink = new SheetsSink({
+      spreadsheetId: 'sheet',
+      log: { info: (s) => lines.push(s) },
+    });
     const tab2 = sheetTabName(1, 0);
     const tab5 = sheetTabName(2, 2);
     sink.loadedTabs.add(tab2);
@@ -175,6 +179,8 @@ describe('SheetsSink', () => {
     assert.equal(appended[1].range, sheetA1(tab5, 'A1'));
     assert.equal(sink.incompleteKeys.has(`${tab2}\t2026-08-17T09:17:00`), true);
     assert.equal(sink.incompleteKeys.has(`${tab2}\t2026-08-17T09:15:00`), false);
+    assert.ok(lines.some((l) => /^timing sheets append tab=1A rows=2 ms=\d+$/.test(l)));
+    assert.ok(lines.some((l) => /^timing sheets write rows=3 append_tabs=2 patch_tabs=0 ms=\d+$/.test(l)));
   });
 
   it('patches existing rows that were stored without open/close', async () => {
@@ -513,9 +519,11 @@ describe('closedRowsForInterval', () => {
 describe('ConfigSheet', () => {
   it('reads timeframe columns C onward from the config tab', async () => {
     const ranges = [];
+    const lines = [];
     const sheet = new ConfigSheet({
       spreadsheetId: 'sheet',
       tab: 'config',
+      log: { info: (s) => lines.push(s) },
       sheetsApi: {
         spreadsheets: {
           values: {
@@ -547,5 +555,6 @@ describe('ConfigSheet', () => {
       ],
     );
     assert.equal(cfg.warnings.length, 1);
+    assert.match(lines[0], /^timing sheets config_read instruments=2 ms=\d+$/);
   });
 });

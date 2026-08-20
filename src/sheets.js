@@ -22,7 +22,7 @@ import {
   tabIdentity,
 } from './columns.js';
 import { MAX_INSTRUMENTS, instrumentIntervals, parseConfigRows } from './instruments.js';
-import { withRetry } from './util.js';
+import { elapsedMs, logTiming, timed, withRetry } from './util.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
@@ -71,14 +71,21 @@ export class ConfigSheet {
   }
 
   async read() {
-    const res = await withRetry(
-      () => this.sheetsApi.spreadsheets.values.get({
-        spreadsheetId: this.spreadsheetId,
-        range: sheetA1(this.tab, 'A1:Z100'),
-      }),
-      retryOpts(this.log, 'config read'),
-    );
-    return parseConfigRows(res.data.values || []);
+    return timed(async () => {
+      const res = await withRetry(
+        () => this.sheetsApi.spreadsheets.values.get({
+          spreadsheetId: this.spreadsheetId,
+          range: sheetA1(this.tab, 'A1:Z100'),
+        }),
+        retryOpts(this.log, 'config read'),
+      );
+      const parsed = parseConfigRows(res.data.values || []);
+      return parsed;
+    }, {
+      log: this.log,
+      label: 'sheets config_read',
+      fields: (parsed) => ({ instruments: parsed?.instruments?.length || 0 }),
+    });
   }
 
   async listTitles() {
@@ -123,20 +130,25 @@ export class SheetsSink {
 
   async ensureStaticTabs() {
     if (this.staticTabsReady) return;
-    const tabs = allStaticTabNames(MAX_INSTRUMENTS, STATIC_INTERVAL_LETTERS);
-    await this.#ensureTabs(tabs);
-    for (const tab of tabs) {
-      const res = await withRetry(
-        () => this.sheetsApi.spreadsheets.values.get({
-          spreadsheetId: this.spreadsheetId,
-          range: sheetA1(tab, 'A1:Z1'),
-        }),
-        retryOpts(this.log, `header ${tab}`),
-      );
-      const header = res.data.values?.[0] || [];
-      if (!header.length) await this.#writeHeader(tab);
-    }
-    this.staticTabsReady = true;
+    await timed(async () => {
+      const tabs = allStaticTabNames(MAX_INSTRUMENTS, STATIC_INTERVAL_LETTERS);
+      await this.#ensureTabs(tabs);
+      for (const tab of tabs) {
+        const res = await withRetry(
+          () => this.sheetsApi.spreadsheets.values.get({
+            spreadsheetId: this.spreadsheetId,
+            range: sheetA1(tab, 'A1:Z1'),
+          }),
+          retryOpts(this.log, `header ${tab}`),
+        );
+        const header = res.data.values?.[0] || [];
+        if (!header.length) await this.#writeHeader(tab);
+      }
+      this.staticTabsReady = true;
+    }, {
+      log: this.log,
+      label: 'sheets ensure_static_tabs',
+    });
   }
 
   async ensureInstrument(instrument) {
@@ -159,15 +171,25 @@ export class SheetsSink {
    * Returns how many data rows were removed.
    */
   async retainSession(instrument, dateStr) {
-    const ivs = instrumentIntervals(instrument);
-    const tabs = ivs.map((_, i) => sheetTabName(instrument.slot, i)).filter(Boolean);
-    await this.#ensureTabs(tabs);
-    let dropped = 0;
-    for (const tab of tabs) {
-      dropped += await this.#retainTabDate(tab, dateStr, instrument);
-      this.loadedTabs.add(tab);
-    }
-    return dropped;
+    return timed(async () => {
+      const ivs = instrumentIntervals(instrument);
+      const tabs = ivs.map((_, i) => sheetTabName(instrument.slot, i)).filter(Boolean);
+      await this.#ensureTabs(tabs);
+      let dropped = 0;
+      for (const tab of tabs) {
+        dropped += await this.#retainTabDate(tab, dateStr, instrument);
+        this.loadedTabs.add(tab);
+      }
+      return dropped;
+    }, {
+      log: this.log,
+      label: 'sheets retain',
+      fields: (dropped) => ({
+        slot: instrument?.slot,
+        date: dateStr,
+        dropped: dropped || 0,
+      }),
+    });
   }
 
   async #titles() {
@@ -289,12 +311,19 @@ export class SheetsSink {
   }
 
   async #ensureHeaderAndLoadKeys(tab, expectedIdentity) {
-    const res = await withRetry(
-      () => this.sheetsApi.spreadsheets.values.get({
-        spreadsheetId: this.spreadsheetId,
-        range: sheetA1(tab, 'A:Z'),
-      }),
-      retryOpts(this.log, `read ${tab}`),
+    const res = await timed(
+      () => withRetry(
+        () => this.sheetsApi.spreadsheets.values.get({
+          spreadsheetId: this.spreadsheetId,
+          range: sheetA1(tab, 'A:Z'),
+        }),
+        retryOpts(this.log, `read ${tab}`),
+      ),
+      {
+        log: this.log,
+        label: 'sheets load_keys',
+        fields: { tab },
+      },
     );
     const values = res.data.values || [];
     const expected = expectedIdentity == null ? null : String(expectedIdentity);
@@ -381,6 +410,7 @@ export class SheetsSink {
   }
 
   async writeRows(rows) {
+    const startedAt = Date.now();
     const tabsNeeded = new Set();
     for (const row of rows || []) {
       const tab = this.tabForRow(row);
@@ -420,15 +450,22 @@ export class SheetsSink {
       const stillNew = list.filter((row) => !this.keys.has(sheetRowKey(tab, row.candle_time)));
       if (!stillNew.length) continue;
       try {
-        await withRetry(
-          () => this.sheetsApi.spreadsheets.values.append({
-            spreadsheetId: this.spreadsheetId,
-            range: sheetA1(tab, 'A1'),
-            valueInputOption: 'RAW',
-            insertDataOption: 'INSERT_ROWS',
-            requestBody: { values: stillNew.map(rowToSheetValues) },
-          }),
-          retryOpts(this.log, `append ${tab}`),
+        await timed(
+          () => withRetry(
+            () => this.sheetsApi.spreadsheets.values.append({
+              spreadsheetId: this.spreadsheetId,
+              range: sheetA1(tab, 'A1'),
+              valueInputOption: 'RAW',
+              insertDataOption: 'INSERT_ROWS',
+              requestBody: { values: stillNew.map(rowToSheetValues) },
+            }),
+            retryOpts(this.log, `append ${tab}`),
+          ),
+          {
+            log: this.log,
+            label: 'sheets append',
+            fields: { tab, rows: stillNew.length },
+          },
         );
         for (const row of stillNew) {
           const k = sheetRowKey(tab, row.candle_time);
@@ -449,6 +486,12 @@ export class SheetsSink {
     for (const [tab, list] of patchByTab) {
       n += await this.#patchTabRows(tab, list);
     }
+    logTiming(this.log, 'sheets write', {
+      rows: n,
+      append_tabs: appendByTab.size,
+      patch_tabs: patchByTab.size,
+      ms: elapsedMs(startedAt),
+    });
     return n;
   }
 
@@ -460,12 +503,19 @@ export class SheetsSink {
     }
     if (!wanted.size) return 0;
 
-    const res = await withRetry(
-      () => this.sheetsApi.spreadsheets.values.get({
-        spreadsheetId: this.spreadsheetId,
-        range: sheetA1(tab, 'A:Z'),
-      }),
-      retryOpts(this.log, `read ${tab} for ohlc patch`),
+    const res = await timed(
+      () => withRetry(
+        () => this.sheetsApi.spreadsheets.values.get({
+          spreadsheetId: this.spreadsheetId,
+          range: sheetA1(tab, 'A:Z'),
+        }),
+        retryOpts(this.log, `read ${tab} for ohlc patch`),
+      ),
+      {
+        log: this.log,
+        label: 'sheets patch_read',
+        fields: { tab },
+      },
     );
     const values = res.data.values || [];
     const header = values[0] || [];
@@ -491,12 +541,19 @@ export class SheetsSink {
     }
     if (!data.length) return 0;
 
-    await withRetry(
-      () => this.sheetsApi.spreadsheets.values.batchUpdate({
-        spreadsheetId: this.spreadsheetId,
-        requestBody: { valueInputOption: 'RAW', data },
-      }),
-      retryOpts(this.log, `patch ohlc ${tab}`),
+    await timed(
+      () => withRetry(
+        () => this.sheetsApi.spreadsheets.values.batchUpdate({
+          spreadsheetId: this.spreadsheetId,
+          requestBody: { valueInputOption: 'RAW', data },
+        }),
+        retryOpts(this.log, `patch ohlc ${tab}`),
+      ),
+      {
+        log: this.log,
+        label: 'sheets patch',
+        fields: { tab, rows: data.length },
+      },
     );
     this.log?.info(`filled missing cells on ${tab} (${data.length} row(s))`);
     return data.length;
