@@ -19,10 +19,12 @@ WebSocket + Protobuf protocol; schemas live in [`src/proto/`](src/proto/).
    process memory only (refresh before expiry; never written to disk).
 3. Tracks up to six instruments (`Instrument1`–`Instrument6`) in
    `EXCHANGE:CATEGORY:SYMBOL` form (`NSE`, `BSE`, or `MCX`). Candle timeframes
-   are read from that row’s cells to the right of the symbol (columns C, D, E,
-   …). There is no default list: if a row has a symbol but no timeframes, that
+   are read only from that row’s first three timeframe cells (columns C, D, E).
+   Cells from column F onward are ignored. There is no default list: if a row has a symbol but no timeframes, that
    instrument is skipped. If only `5m` and `10m` are listed, only those bars
    are requested.
+   After the initial backfill, a timeframe is requested only when its current
+   candle can have closed; each response still contains that timeframe's day data.
 4. Writes **closed** candles to **static** tabs named from the config slot and
    timeframe letter: `Instrument1` → `1A`, `1B`, `1C`, `Instrument2` → `2A`,
    `2B`, `2C`, and so on (column C → A, D → B, E → C). Forming bars are never
@@ -39,7 +41,7 @@ WebSocket + Protobuf protocol; schemas live in [`src/proto/`](src/proto/).
 ## Config sheet
 
 Create a tab named `config` with labels in column A, the login / instrument
-id in column B, and candle timeframes in columns C onward:
+id in column B, and candle timeframes in columns C–E:
 
 | A | B | C | D | E |
 | --- | --- | --- | --- | --- |

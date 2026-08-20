@@ -107,11 +107,11 @@ describe('parseConfigRows', () => {
     assert.deepEqual(cfg.warnings, []);
   });
 
-  it('reads per-instrument candle timeframes from columns C onward', () => {
+  it('reads per-instrument candle timeframes only from columns C–E', () => {
     const cfg = parseConfigRows([
       ['email', 'trader@example.com'],
       ['password', 'secret'],
-      ['Instrument1', 'NSE:FUTURE:NIFTY-I', '2m', '3m', '5m'],
+      ['Instrument1', 'NSE:FUTURE:NIFTY-I', '2m', '3m', '5m', 'personal notes', '10m'],
       ['Instrument2', 'NSE:OPTIONS:NIFTY2681824100CE', '5m', '10m'],
       ['Instrument3', 'NSE:OPTIONS:NIFTY2681824300CE', '15m'],
       ['Instrument4'],
@@ -126,6 +126,7 @@ describe('parseConfigRows', () => {
         { slot: 3, id: 'NSE:OPTIONS:NIFTY2681824300CE', intervals: ['15m'] },
       ],
     );
+    assert.deepEqual(cfg.errors, []);
   });
 
   it('does not generate data when no timeframes are given', () => {

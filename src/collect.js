@@ -1,7 +1,25 @@
 import { instrumentIntervals, symbolId } from './instruments.js';
 import { footprintMetrics, oiFields, vwapByCandleTime } from './metrics.js';
-import { isCandleClosed, isPersistableCandle, inSession } from './session.js';
+import { candleCloseMs, isCandleClosed, isPersistableCandle, marketWindowMs, persistSessionDate } from './session.js';
 import { dedupeOhlcBars, findOhlcBar } from './gocharting.js';
+
+function indexOhlcBars(bars) {
+  const sorted = (bars || [])
+    .filter((bar) => bar?.time)
+    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
+  const byTime = new Map();
+  const byInstant = new Map();
+  const previous = new Map();
+  let prior = null;
+  for (const bar of sorted) {
+    byTime.set(bar.time, bar);
+    const instant = Date.parse(bar.time);
+    if (Number.isFinite(instant)) byInstant.set(instant, bar);
+    previous.set(bar, prior);
+    prior = bar;
+  }
+  return { byTime, byInstant, previous };
+}
 
 export function candleToRow({
   instrument,
@@ -9,6 +27,7 @@ export function candleToRow({
   candle,
   ohlcBars,
   vwapMap,
+  ohlcIndex,
   sampled_at_utc,
   sampled_at_ist,
   sample_n,
@@ -16,10 +35,16 @@ export function candleToRow({
   error,
 }) {
   const stats = candle ? footprintMetrics(candle) : {};
-  const bar = candle ? findOhlcBar(ohlcBars, stats.candle_time) : null;
+  const candleInstant = Date.parse(stats.candle_time);
+  const bar = candle && ohlcIndex
+    ? (ohlcIndex.byTime.get(stats.candle_time) || ohlcIndex.byInstant.get(candleInstant) || null)
+    : (candle ? findOhlcBar(ohlcBars, stats.candle_time) : null);
+  const previousBar = bar && ohlcIndex ? (ohlcIndex.previous.get(bar) ?? null) : undefined;
   const high = bar ? bar.high : (candle ? stats.fp_high : '');
   const low = bar ? bar.low : (candle ? stats.fp_low : '');
-  const oi = bar ? oiFields(bar, ohlcBars) : { oi: '', oi_change: '' };
+  const oi = bar
+    ? (ohlcIndex ? oiFields(bar, ohlcBars, previousBar) : oiFields(bar, ohlcBars))
+    : { oi: '', oi_change: '' };
   const vwap = bar && vwapMap ? (vwapMap.get(bar.time) ?? '') : '';
   return {
     sampled_at_utc,
@@ -73,8 +98,14 @@ export function closedRowsForInterval({
   sample_n,
   error,
 }) {
-  const sessionBars = (ohlcBars || []).filter((b) => inSession(b.time, sessionOpts));
+  const sessionDate = persistSessionDate(nowMs, sessionOpts);
+  const { openMs, closeMs } = marketWindowMs(sessionDate, sessionOpts?.open, sessionOpts?.close);
+  const sessionBars = (ohlcBars || []).filter((bar) => {
+    const t = Date.parse(bar?.time);
+    return Number.isFinite(t) && t >= openMs && t < closeMs;
+  });
   const vwapMap = vwapByCandleTime(sessionBars);
+  const ohlcIndex = indexOhlcBars(ohlcBars);
   const closed = (candles || [])
     .filter((c) => isPersistableCandle(c.date, nowMs, sessionOpts))
     .filter((c) => isCandleClosed(c.date, interval, nowMs, sessionOpts))
@@ -86,6 +117,7 @@ export function closedRowsForInterval({
     candle,
     ohlcBars,
     vwapMap,
+    ohlcIndex,
     sampled_at_utc,
     sampled_at_ist,
     sample_n,
@@ -94,9 +126,22 @@ export function closedRowsForInterval({
   }));
 }
 
+export function nextIntervalFetchAt(candles, interval, sessionOpts = {}) {
+  let latest = -Infinity;
+  for (const candle of candles || []) {
+    const t = Date.parse(candle?.date);
+    if (Number.isFinite(t) && t > latest) latest = t;
+  }
+  if (!Number.isFinite(latest)) return null;
+  const closeAt = candleCloseMs(new Date(latest).toISOString(), interval, sessionOpts);
+  if (!Number.isFinite(closeAt)) return null;
+  return closeAt + Number(sessionOpts.graceMs || 0);
+}
+
 export async function sampleInstruments({
   client,
   instruments,
+  intervalsFor = instrumentIntervals,
   sessionDatesFor,
   sessionOptsFor,
   nowMs,
@@ -107,7 +152,7 @@ export async function sampleInstruments({
   const rows = [];
   const summaries = [];
   await Promise.all((instruments || []).map(async (instrument) => {
-    const ivs = instrumentIntervals(instrument);
+    const ivs = intervalsFor(instrument) || [];
     if (!ivs.length) return;
     const sessionOpts = sessionOptsFor(instrument, nowMs);
     const dates = sessionDatesFor(nowMs, sessionOpts);
@@ -144,6 +189,7 @@ export async function sampleInstruments({
         candles: (fp?.candles || []).length,
         ohlcBars: ohlcBars.length,
         ohlcMiss,
+        nextFetchAt: fp?.ok ? nextIntervalFetchAt(fp.candles, interval, sessionOpts) : null,
         error: fp?.ok ? '' : (fp?.error || ''),
       });
     }

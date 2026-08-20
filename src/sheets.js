@@ -62,6 +62,13 @@ function retryOpts(log, label) {
   };
 }
 
+async function settledSum(promises) {
+  const results = await Promise.allSettled(promises);
+  const failed = results.find((result) => result.status === 'rejected');
+  if (failed) throw failed.reason;
+  return results.reduce((sum, result) => sum + (result.value || 0), 0);
+}
+
 export class ConfigSheet {
   constructor({ sheetsApi, spreadsheetId, tab = 'config', log } = {}) {
     this.sheetsApi = sheetsApi;
@@ -74,7 +81,7 @@ export class ConfigSheet {
     const res = await withRetry(
       () => this.sheetsApi.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: sheetA1(this.tab, 'A1:Z100'),
+        range: sheetA1(this.tab, 'A1:E8'),
       }),
       retryOpts(this.log, 'config read'),
     );
@@ -103,6 +110,7 @@ export class SheetsSink {
     this.loadedTabs = new Set();
     this.boundIdentity = new Map();
     this.staticTabsReady = false;
+    this.sheetTitles = null;
   }
 
   tabForRow(row) {
@@ -125,16 +133,27 @@ export class SheetsSink {
     if (this.staticTabsReady) return;
     const tabs = allStaticTabNames(MAX_INSTRUMENTS, STATIC_INTERVAL_LETTERS);
     await this.#ensureTabs(tabs);
-    for (const tab of tabs) {
-      const res = await withRetry(
-        () => this.sheetsApi.spreadsheets.values.get({
+    const res = await withRetry(
+      () => this.sheetsApi.spreadsheets.values.batchGet({
+        spreadsheetId: this.spreadsheetId,
+        ranges: tabs.map((tab) => sheetA1(tab, 'A1:Z1')),
+      }),
+      retryOpts(this.log, 'static headers'),
+    );
+    const valueRanges = res.data.valueRanges || [];
+    const missingHeaders = [];
+    for (let i = 0; i < tabs.length; i += 1) {
+      const header = valueRanges[i]?.values?.[0] || [];
+      if (!header.length) missingHeaders.push({ range: sheetA1(tabs[i], 'A1'), values: [SHEET_COLUMNS] });
+    }
+    if (missingHeaders.length) {
+      await withRetry(
+        () => this.sheetsApi.spreadsheets.values.batchUpdate({
           spreadsheetId: this.spreadsheetId,
-          range: sheetA1(tab, 'A1:Z1'),
+          requestBody: { valueInputOption: 'RAW', data: missingHeaders },
         }),
-        retryOpts(this.log, `header ${tab}`),
+        retryOpts(this.log, 'static headers write'),
       );
-      const header = res.data.values?.[0] || [];
-      if (!header.length) await this.#writeHeader(tab);
     }
     this.staticTabsReady = true;
   }
@@ -143,14 +162,13 @@ export class SheetsSink {
     const ivs = instrumentIntervals(instrument);
     const tabs = sheetTabNamesFor(instrument);
     await this.#ensureTabs(tabs);
-    for (let i = 0; i < tabs.length; i += 1) {
-      const tab = tabs[i];
+    await Promise.all(tabs.map(async (tab, i) => {
       const expected = tabIdentity(instrument.slot, ivs[i], instrument.id);
-      if (this.loadedTabs.has(tab) && this.boundIdentity.get(tab) === expected) continue;
+      if (this.loadedTabs.has(tab) && this.boundIdentity.get(tab) === expected) return;
       await this.#ensureHeaderAndLoadKeys(tab, expected);
       this.loadedTabs.add(tab);
       this.boundIdentity.set(tab, expected);
-    }
+    }));
   }
 
   /**
@@ -162,15 +180,16 @@ export class SheetsSink {
     const ivs = instrumentIntervals(instrument);
     const tabs = ivs.map((_, i) => sheetTabName(instrument.slot, i)).filter(Boolean);
     await this.#ensureTabs(tabs);
-    let dropped = 0;
-    for (const tab of tabs) {
-      dropped += await this.#retainTabDate(tab, dateStr, instrument);
+    const dropped = await Promise.all(tabs.map(async (tab) => {
+      const n = await this.#retainTabDate(tab, dateStr, instrument);
       this.loadedTabs.add(tab);
-    }
-    return dropped;
+      return n;
+    }));
+    return dropped.reduce((sum, n) => sum + n, 0);
   }
 
   async #titles() {
+    if (this.sheetTitles) return this.sheetTitles;
     const meta = await withRetry(
       () => this.sheetsApi.spreadsheets.get({
         spreadsheetId: this.spreadsheetId,
@@ -178,7 +197,8 @@ export class SheetsSink {
       }),
       retryOpts(this.log, 'spreadsheet meta'),
     );
-    return new Set((meta.data.sheets || []).map((s) => s.properties?.title).filter(Boolean));
+    this.sheetTitles = new Set((meta.data.sheets || []).map((s) => s.properties?.title).filter(Boolean));
+    return this.sheetTitles;
   }
 
   async #ensureTabs(tabs) {
@@ -194,6 +214,7 @@ export class SheetsSink {
       }),
       retryOpts(this.log, 'add sheets'),
     );
+    for (const title of missing) existing.add(title);
   }
 
   async #writeHeader(tab) {
@@ -415,10 +436,9 @@ export class SheetsSink {
       patchByTab.get(tab).push(row);
     }
 
-    let n = 0;
-    for (const [tab, list] of appendByTab) {
+    let n = await settledSum([...appendByTab].map(async ([tab, list]) => {
       const stillNew = list.filter((row) => !this.keys.has(sheetRowKey(tab, row.candle_time)));
-      if (!stillNew.length) continue;
+      if (!stillNew.length) return 0;
       try {
         await withRetry(
           () => this.sheetsApi.spreadsheets.values.append({
@@ -436,7 +456,7 @@ export class SheetsSink {
           if (sheetRowNeedsPatch(SHEET_COLUMNS, rowToSheetValues(row))) this.incompleteKeys.add(k);
           else this.incompleteKeys.delete(k);
         }
-        n += stillNew.length;
+        return stillNew.length;
       } catch (err) {
         this.log?.error(`append failed for ${tab}; reloading keys`, err);
         try { await this.#reloadTabKeys(tab); } catch (reloadErr) {
@@ -444,11 +464,8 @@ export class SheetsSink {
         }
         throw err;
       }
-    }
-
-    for (const [tab, list] of patchByTab) {
-      n += await this.#patchTabRows(tab, list);
-    }
+    }));
+    n += await settledSum([...patchByTab].map(([tab, list]) => this.#patchTabRows(tab, list)));
     return n;
   }
 

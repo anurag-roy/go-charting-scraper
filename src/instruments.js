@@ -50,7 +50,7 @@ export function parseIntervalToken(raw) {
 }
 
 /**
- * Timeframe cells from a config row (columns C onward). Blank cells are ignored.
+ * Timeframe cells from a config row (columns C–E). Blank cells are ignored.
  * There is no default list — an empty result means generate nothing.
  */
 export function parseIntervalCells(cells) {
@@ -96,7 +96,7 @@ export function parseConfigRows(rows) {
     if (!row || row[0] == null || String(row[0]).trim() === '') continue;
     map.set(normalizeConfigKey(row[0]), {
       value: cellValue(row, 1),
-      extra: Array.isArray(row) ? row.slice(2) : [],
+      extra: Array.isArray(row) ? row.slice(2, 5) : [],
     });
   }
 

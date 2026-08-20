@@ -187,7 +187,7 @@ export class Supervisor {
     const due = [];
     for (const inst of this.liveInstruments) {
       if (!instrumentIntervals(inst).length) continue;
-      const state = this.instrumentState.get(this.#stateKey(inst)) || {};
+      const state = this.#stateFor(inst);
       const work = workForInstrument(inst, nowMs, state, extra);
       if (work.action !== 'idle') due.push({ instrument: inst, work, state });
     }
@@ -246,9 +246,53 @@ export class Supervisor {
     return inst?.slot ?? inst?.id;
   }
 
+  #stateFor(inst) {
+    const key = this.#stateKey(inst);
+    let state = this.instrumentState.get(key);
+    if (!state) {
+      state = { backfilledSessionDate: null, retainedDate: null, intervalNextAt: new Map() };
+      this.instrumentState.set(key, state);
+    }
+    if (!(state.intervalNextAt instanceof Map)) state.intervalNextAt = new Map();
+    return state;
+  }
+
+  #intervalsForSample({ instrument, work, state }, nowMs, force) {
+    const intervals = instrumentIntervals(instrument);
+    if (force || work.action === 'backfill') return intervals;
+    return intervals.filter((interval) => nowMs >= (state.intervalNextAt.get(interval) ?? -Infinity));
+  }
+
+  #earliestIntervalFetchAt(nowMs) {
+    let earliest = Infinity;
+    for (const inst of this.liveInstruments) {
+      const schedule = this.instrumentState.get(this.#stateKey(inst))?.intervalNextAt;
+      if (!(schedule instanceof Map)) continue;
+      for (const value of schedule.values()) {
+        const t = Number(value);
+        if (Number.isFinite(t) && t > nowMs && t < earliest) earliest = t;
+      }
+    }
+    return earliest;
+  }
+
+  #scheduleNextSample(startedAt) {
+    const nowMs = this.now();
+    const periods = Math.max(1, Math.ceil(Math.max(0, nowMs - startedAt) / this.cfg.sampleMs));
+    const cadenceAt = startedAt + periods * this.cfg.sampleMs;
+    const intervalAt = this.#earliestIntervalFetchAt(nowMs);
+    this.nextSampleAt = Number.isFinite(intervalAt)
+      ? Math.min(cadenceAt, intervalAt)
+      : cadenceAt;
+  }
+
   async #startSlot(inst) {
     await this.sink.ensureInstrument(inst);
-    this.instrumentState.set(this.#stateKey(inst), { backfilledSessionDate: null, retainedDate: null });
+    this.instrumentState.set(this.#stateKey(inst), {
+      backfilledSessionDate: null,
+      retainedDate: null,
+      intervalNextAt: new Map(),
+    });
     this.nextSampleAt = 0;
     this.#wakeSampleLoop();
   }
@@ -263,25 +307,26 @@ export class Supervisor {
       this.instrumentState.delete(this.#stateKey(inst));
       if (!nextIds.has(inst.id)) this.client?.dropSymbol(inst.id);
     }
-    for (const { from, to } of replaced) {
+    await Promise.all(replaced.map(async ({ from, to }) => {
       this.log.info('replace slot', to.slot, `${from.id} -> ${to.id}`);
       this.sink.dropInstrument(from);
       this.instrumentState.delete(this.#stateKey(from));
       if (!nextIds.has(from.id)) this.client?.dropSymbol(from.id);
       await this.#startSlot(to);
-    }
-    for (const inst of added) {
+    }));
+    await Promise.all(added.map(async (inst) => {
       const ivs = instrumentIntervals(inst);
       this.log.info('start monitoring', `slot ${inst.slot}`, inst.id, ivs.join(', '));
       await this.#startSlot(inst);
-    }
+    }));
     for (const inst of updated) {
       this.log.info('update intervals', `slot ${inst.slot}`, inst.id, instrumentIntervals(inst).join(', ') || '(none)');
       this.sink.dropInstrument(inst);
       await this.sink.ensureInstrument(inst);
-      const state = this.instrumentState.get(this.#stateKey(inst)) || {};
+      const state = this.#stateFor(inst);
       state.backfilledSessionDate = null;
       state.retainedDate = null;
+      state.intervalNextAt = new Map();
       this.instrumentState.set(this.#stateKey(inst), state);
       this.nextSampleAt = 0;
       this.#wakeSampleLoop();
@@ -296,17 +341,16 @@ export class Supervisor {
   /** Drop sheet rows that are not from today's IST calendar date. */
   async retainCurrentDay() {
     const today = istDateString(new Date(this.now()));
-    let dropped = 0;
-    for (const inst of this.liveInstruments) {
-      const state = this.instrumentState.get(this.#stateKey(inst)) || {};
-      if (state.retainedDate === today) continue;
+    const dropped = await Promise.all(this.liveInstruments.map(async (inst) => {
+      const state = this.#stateFor(inst);
+      if (state.retainedDate === today) return 0;
       const n = await this.sink.retainSession(inst, today);
       if (n > 0) this.log.info(`removed ${n} previous-day row(s) for ${inst.id}`);
       state.retainedDate = today;
       this.instrumentState.set(this.#stateKey(inst), state);
-      dropped += n;
-    }
-    return dropped;
+      return n;
+    }));
+    return dropped.reduce((sum, n) => sum + n, 0);
   }
 
   async sampleDue(force) {
@@ -321,19 +365,38 @@ export class Supervisor {
       const needImmediate = force || due.some((d) => d.work.action === 'backfill') || this.nextSampleAt === 0;
       if (!needImmediate && nowMs < this.nextSampleAt) return 0;
 
+      const intervalsBySlot = new Map();
+      for (const item of due) {
+        const intervals = this.#intervalsForSample(item, nowMs, force);
+        if (intervals.length) intervalsBySlot.set(this.#stateKey(item.instrument), intervals);
+      }
+      const planned = due.filter((item) => intervalsBySlot.has(this.#stateKey(item.instrument)));
+      if (!planned.length) {
+        this.#scheduleNextSample(nowMs);
+        return 0;
+      }
+
       await this.auth.ensure(this.liveConfig.email, this.liveConfig.password);
+
       await this.#ensureWs();
 
       this.sampleN += 1;
       const sampled_at_utc = new Date(nowMs).toISOString();
       const sampled_at_ist = formatIst(new Date(nowMs));
-      this.log.info(`sample ${this.sampleN}`, due.map((d) => `${d.instrument.id}/${d.work.action}`).join(', '));
+      const samplePlan = planned.map((d) => {
+        const intervals = intervalsBySlot.get(this.#stateKey(d.instrument));
+        return `${d.instrument.id}/${d.work.action}:${intervals.join(',')}`;
+      }).join(', ');
+      this.log.info(`sample ${this.sampleN}`, samplePlan);
 
       const { rows, summaries } = await sampleInstruments({
         client: this.client,
-        instruments: due.map((d) => d.instrument),
+        instruments: planned.map((d) => d.instrument),
+        intervalsFor: (inst) => intervalsBySlot.get(this.#stateKey(inst)),
         sessionDatesFor,
-        sessionOptsFor: (inst) => due.find((d) => d.instrument.id === inst.id)?.work.hours,
+        sessionOptsFor: (inst) => planned.find(
+          (d) => this.#stateKey(d.instrument) === this.#stateKey(inst),
+        )?.work.hours,
         nowMs,
         sampled_at_utc,
         sampled_at_ist,
@@ -355,14 +418,21 @@ export class Supervisor {
         throw err;
       }
 
-      for (const d of due) {
-        const state = this.instrumentState.get(this.#stateKey(d.instrument)) || {};
+      for (const summary of summaries) {
+        const item = planned.find((d) => d.instrument.id === summary.id);
+        if (!item) continue;
+        const schedule = this.#stateFor(item.instrument).intervalNextAt;
+        if (Number.isFinite(summary.nextFetchAt)) schedule.set(summary.interval, summary.nextFetchAt);
+        else schedule.delete(summary.interval);
+      }
+      for (const d of planned) {
+        const state = this.#stateFor(d.instrument);
         state.backfilledSessionDate = d.work.persistDate;
         this.instrumentState.set(this.#stateKey(d.instrument), state);
       }
       this.lastSampleAt = sampled_at_utc;
       this.lastError = null;
-      this.nextSampleAt = this.now() + this.cfg.sampleMs;
+      this.#scheduleNextSample(nowMs);
       this.wsBackoffMs = 1000;
       this.log.info(`wrote ${wrote} new closed-candle row(s)`);
       this.#status({ lastWrote: wrote });

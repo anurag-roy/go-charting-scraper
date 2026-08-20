@@ -208,7 +208,7 @@ A UTF-16 save from Notepad will break startup.
 
 Open the spreadsheet you were given. There must be a tab named exactly
 **`config`**, with labels in column A, the login / instrument id in column B,
-and candle timeframes in columns C onward:
+and candle timeframes in columns C–E (cells from F onward are ignored):
 
 | A | B (example) | C | D | E |
 | --- | --- | --- | --- | --- |
@@ -298,8 +298,8 @@ not pasted. See [§12](#12-troubleshooting).
    (`C:\Users\<you>\go-charting-scraper\start.bat`).
 4. **Leave that black window open.** Closing it stops the scraper. You can
    minimise it.
-5. Work as usual. The sheet updates every ~15 seconds while the market is
-   open.
+5. Work as usual. While the market is open, the scraper checks on its configured
+   cadence and writes each candle shortly after that timeframe closes.
 
 To start from a terminal instead of the `.bat` file:
 
@@ -381,7 +381,7 @@ the handover unless the spreadsheet or service account is replaced.
 
 | Check | Healthy sign |
 | --- | --- |
-| Scraper window | New `INFO sample N …` lines about every 15 seconds during market hours |
+| Scraper window | New `INFO sample N …` lines when one or more configured timeframes can have closed |
 | Google Sheet | New rows on `1A` / `1B` / `1C` (and `2A` …) after each bar closes |
 | `logs\status.json` | `"ws": "open"` during the session; `instruments` matches `config` |
 | `logs\error.log` | Empty, or only old errors you already fixed |
@@ -398,7 +398,7 @@ can still appear in `status.json`.
 | `node` is not recognized | Node.js not installed, or terminal opened before install | Reinstall Node 22 LTS with PATH checked. Close all terminals and try again. |
 | `set GOOGLE_SHEET_ID` (process exits) | `.env` missing or not in the project folder | Place `.env` next to `package.json`. Use the full sheet URL or the id from the URL. |
 | `Google credentials are missing` / file not found | JSON path wrong, or PEM not pasted | Put `google-service-account.json` in the project folder, or fix `GOOGLE_CLIENT_EMAIL` / `GOOGLE_PRIVATE_KEY`. |
-| `config sheet is missing email, password, or instruments with candle timeframes` | Tab name or cells | Tab must be `config`. Labels in A, symbol in B, timeframes in C onward. |
+| `config sheet is missing email, password, or instruments with candle timeframes` | Tab name or cells | Tab must be `config`. Labels in A, symbol in B, timeframes in C–E. |
 | `cognito auth failed` / `NotAuthorizedException` | Wrong GoCharting password on the sheet | Fix the `config` email/password. There is no login window. |
 | `ws unexpected HTTP 401` / connect timeout | JWT rejected, or office network blocking WSS | Confirm internet. Try without VPN. Allow outbound `origin.ws.prodb.blr1.gocharting.com`. |
 | Window was working, then it froze and the sheet stopped | PC slept or Wi‑Fi dropped | Follow [§9](#9-keep-the-laptop-awake). Start `start.bat` again; duplicates are skipped. |

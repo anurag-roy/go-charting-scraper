@@ -120,12 +120,12 @@ export function previousOhlcBar(bars, candleTime) {
   return prev;
 }
 
-export function oiFields(bar, bars) {
+export function oiFields(bar, bars, previousBar) {
   if (!bar || bar.oi == null || bar.oi === '') {
     return { oi: '', oi_change: '' };
   }
   const oi = num(bar.oi);
-  const prev = previousOhlcBar(bars, bar.time);
+  const prev = arguments.length >= 3 ? previousBar : previousOhlcBar(bars, bar.time);
   if (!prev || prev.oi == null || prev.oi === '') {
     return { oi, oi_change: '' };
   }
