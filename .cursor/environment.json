@@ -1,0 +1,4 @@
+{
+  "name": "go-charting-scraper",
+  "install": "npm ci"
+}
