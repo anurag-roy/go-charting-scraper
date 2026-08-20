@@ -1,5 +1,3 @@
-import { timed } from './util.js';
-
 const COGNITO_REGION = 'ap-south-1';
 export const COGNITO_CLIENT_ID = '3fqhvm22ea8pjsr2spbnv484pr';
 export const COGNITO_ENDPOINT = `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`;
@@ -90,10 +88,7 @@ export class AuthSession {
   }
 
   async login(email, password) {
-    const next = await timed(
-      () => this.cognito({ username: email, password }),
-      { log: this.log, label: 'cognito login' },
-    );
+    const next = await this.cognito({ username: email, password });
     this.email = email;
     this.password = password;
     this.tokens = next;
@@ -108,23 +103,14 @@ export class AuthSession {
     let next;
     try {
       if (this.tokens?.refreshToken) {
-        next = await timed(
-          () => this.cognito({ refreshToken: this.tokens.refreshToken }),
-          { log: this.log, label: 'cognito refresh' },
-        );
+        next = await this.cognito({ refreshToken: this.tokens.refreshToken });
       } else {
-        next = await timed(
-          () => this.cognito({ username: this.email, password: this.password }),
-          { log: this.log, label: 'cognito login' },
-        );
+        next = await this.cognito({ username: this.email, password: this.password });
       }
     } catch (err) {
       if (this.email && this.password) {
         this.log?.warn('refresh token failed; logging in again');
-        next = await timed(
-          () => this.cognito({ username: this.email, password: this.password }),
-          { log: this.log, label: 'cognito login' },
-        );
+        next = await this.cognito({ username: this.email, password: this.password });
       } else {
         throw err;
       }

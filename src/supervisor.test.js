@@ -89,7 +89,6 @@ describe('Supervisor instrument hot-swap', () => {
 
   it('backfills a newly added instrument immediately', async () => {
     const requested = [];
-    const lines = [];
     const sink = {
       async ensureStaticTabs() {},
       async ensureInstrument() {},
@@ -122,11 +121,7 @@ describe('Supervisor instrument hot-swap', () => {
     };
     const supervisor = new Supervisor({
       cfg: baseCfg(),
-      log: {
-        info(...args) { lines.push(args.map(String).join(' ')); },
-        warn() {},
-        error() {},
-      },
+      log: silentLog(),
       configSheet: { read: async () => ({}) },
       sink,
       auth: mockAuth(),
@@ -140,8 +135,6 @@ describe('Supervisor instrument hot-swap', () => {
     assert.ok(requested.includes('MCX:FUTURE:CRUDEOIL-I:2m'));
     assert.equal(wrote > 0, true);
     assert.equal(supervisor.instrumentState.get(y.slot).backfilledSessionDate, '2026-08-17');
-    assert.ok(lines.some((l) => /^timing gocharting sample_fetch sample=1 instruments=1 closed_rows=\d+ ms=\d+$/.test(l)));
-    assert.ok(lines.some((l) => /^timing sample 1 .*gocharting_ms=\d+.*sheets_write_ms=\d+.*total_ms=\d+$/.test(l)));
   });
 
   it('requests only the timeframes listed on each instrument', async () => {
@@ -302,5 +295,102 @@ describe('Supervisor instrument hot-swap', () => {
     assert.equal(dropped, 4);
     assert.equal(retained.at(-1).dateStr, '2026-08-18');
     assert.equal(supervisor.instrumentState.get(x.slot).retainedDate, '2026-08-18');
+  });
+
+  it('requests only intervals whose current candle can have closed', async () => {
+    let nowMs = Date.parse('2026-08-17T10:00:03+05:30');
+    const requested = [];
+    const x = inst('NSE:FUTURE:NIFTY-I', ['2m', '5m'], 1);
+    const sink = {
+      async ensureStaticTabs() {},
+      async ensureInstrument() {},
+      dropInstrument() {},
+      async retainSession() { return 0; },
+      async writeRows() { return 0; },
+    };
+    const client = {
+      isOpen: () => true,
+      ws: { readyState: 1 },
+      dropSymbol() {},
+      async disconnect() {},
+      async connect() {},
+      ohlcCollector: { getBars() { return []; } },
+      async requestInterval(instrument, interval) {
+        requested.push(interval);
+        const rolled = interval === '2m' && nowMs >= Date.parse('2026-08-17T10:02:02+05:30');
+        return {
+          ok: true,
+          candles: [{
+            date: rolled
+              ? '2026-08-17T10:02:00+05:30'
+              : '2026-08-17T10:00:00+05:30',
+          }],
+        };
+      },
+      async requestOhlc() { return { ok: true, bars: [] }; },
+    };
+    const cfg = { ...baseCfg(), sampleMs: 5_000 };
+    const supervisor = new Supervisor({
+      cfg,
+      log: silentLog(),
+      configSheet: { read: async () => ({}) },
+      sink,
+      auth: mockAuth(),
+      client,
+      now: () => nowMs,
+    });
+    supervisor.liveConfig = { email: 'a@b.c', password: 'pw' };
+    await supervisor.reconcile([x]);
+
+    await supervisor.sampleDue(true);
+    assert.deepEqual(requested.sort(), ['2m', '5m']);
+
+    requested.length = 0;
+    nowMs = Date.parse('2026-08-17T10:00:08+05:30');
+    await supervisor.sampleDue(false);
+    assert.deepEqual(requested, []);
+
+    nowMs = Date.parse('2026-08-17T10:02:02+05:30');
+    await supervisor.sampleDue(false);
+    assert.deepEqual(requested, ['2m']);
+  });
+
+  it('keeps SAMPLE_MS on a start-to-start cadence when a sample overruns', async () => {
+    const startedAt = Date.parse('2026-08-17T10:00:00+05:30');
+    let nowMs = startedAt;
+    const x = inst('NSE:FUTURE:NIFTY-I', ['2m'], 1);
+    const supervisor = new Supervisor({
+      cfg: { ...baseCfg(), sampleMs: 5_000 },
+      log: silentLog(),
+      configSheet: { read: async () => ({}) },
+      sink: {
+        async ensureStaticTabs() {},
+        async ensureInstrument() {},
+        dropInstrument() {},
+        async retainSession() { return 0; },
+        async writeRows() { return 0; },
+      },
+      auth: mockAuth(),
+      client: {
+        isOpen: () => true,
+        ws: { readyState: 1 },
+        dropSymbol() {},
+        async disconnect() {},
+        async connect() {},
+        ohlcCollector: { getBars() { return []; } },
+        async requestInterval() {
+          nowMs += 6_200;
+          return { ok: false, candles: [], error: 'test' };
+        },
+        async requestOhlc() { return { ok: true, bars: [] }; },
+      },
+      now: () => nowMs,
+    });
+    supervisor.liveConfig = { email: 'a@b.c', password: 'pw' };
+    await supervisor.reconcile([x]);
+
+    await supervisor.sampleDue(true);
+
+    assert.equal(supervisor.nextSampleAt, startedAt + 10_000);
   });
 });

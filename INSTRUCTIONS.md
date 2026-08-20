@@ -68,8 +68,9 @@ process waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the
 print, then appends the row. Restarts skip `candle_time` values already on
 that tab.
 
-Default behaviour: run forever. While an exchange is in session, sample about
-every **15 seconds**. Overnight and on weekends the WebSocket is closed; the
+Default behaviour: run forever. While an exchange is in session, the scheduler
+checks about every **15 seconds**, but only requests a timeframe when its current
+candle can have closed. Overnight and on weekends the WebSocket is closed; the
 process stays up and keeps polling the `config` tab.
 
 Verified on Linux: Node 22, outbound HTTPS + WSS only (no Chromium, no Xvfb,
@@ -154,8 +155,8 @@ scraper.
 
 Create (or reuse) a spreadsheet. Add a tab named exactly **`config`**.
 Put labels in column A, the login / instrument id in column B, and candle
-timeframes in columns C onward (order of rows does not matter; keys are
-case-insensitive):
+timeframes in columns C–E (order of rows does not matter; keys are
+case-insensitive; cells from F onward are ignored):
 
 | A | B (example) | C | D | E |
 | --- | --- | --- | --- | --- |
@@ -174,9 +175,9 @@ ignored. Duplicate instruments are monitored once. At most six instruments
 (`Instrument1`–`Instrument6`) are read; extra slots are ignored.
 
 Timeframes are minute bars such as `2m`, `5m`, `10m`. Each instrument uses
-**only** the timeframes written on its row — there is no default list. If a
-row has a symbol but no timeframes, that instrument is skipped. You can put
-as many timeframes as you need in columns C, D, E, …
+**only** the timeframes written in columns C, D, and E — there is no default
+list. If a row has a symbol but no timeframes in those three cells, that
+instrument is skipped. Other content from column F onward is ignored.
 
 The password is **plaintext in the spreadsheet**. Share the file only with
 people who should have that GoCharting login, plus the service account.
@@ -346,7 +347,7 @@ spreadsheet id are required.
 | `GOOGLE_CLIENT_EMAIL` / `GOOGLE_PRIVATE_KEY` | unset | Alternative to the JSON file (`\n` in the PEM is unescaped) |
 | `CONFIG_TAB` | `config` | Name of the config worksheet |
 | `CONFIG_POLL_MS` | `5000` | How often to re-read `config` (min 1000) |
-| `SAMPLE_MS` | `15000` | Delay between GoCharting samples while in session |
+| `SAMPLE_MS` | `15000` | Maximum start-to-start polling cadence while in session; candle-close deadlines can wake it sooner |
 | `CLOSE_GRACE_MS` | `2000` | Wait after a bar’s end before treating it as closed |
 | `AFTER_CLOSE_BUFFER_MS` | `60000` | Extra sampling after the session close to catch last bars |
 | `TOKEN_REFRESH_MS` | `2700000` (45 min) | Refresh Cognito JWT / reconnect WebSocket |
@@ -556,20 +557,6 @@ Written under `logs/` in the working directory (gitignored except
 | `logs/status.json` | Last config summary (no password), last sample time, websocket `open`/`closed`. |
 | stdout / `journalctl` | Routine `INFO` / `WARN` lines. |
 
-Every third-party call also emits a grep-friendly `timing …` INFO line (milliseconds wall-clock, including retries and the ~1.2s GoCharting quiet wait):
-
-| Line prefix | When |
-| --- | --- |
-| `timing sheets config_read` | Each `config` tab poll |
-| `timing gocharting FOOTPRINT` / `OHLC` | Each WebSocket request (includes the quiet timeout) |
-| `timing gocharting sample_fetch` | Wall-clock of one sample’s parallel GoCharting pulls |
-| `timing sheets append` / `patch` / `write` | Google write (per tab and total) |
-| `timing sample N` | One sample cycle: `auth_ms`, `ws_ms`, `gocharting_ms`, `sheets_write_ms`, `total_ms` |
-| `timing cognito login` / `refresh` | Only when Cognito is actually called |
-| `timing gocharting ws_connect` | WebSocket handshake |
-
-On Linux: `journalctl -u gocharting-scraper | grep timing`.
-
 The `gocharting` user must be able to write `logs/` (the `chown` in §13.1
 covers that).
 
@@ -599,7 +586,7 @@ covers that).
 | --- | --- | --- |
 | `set GOOGLE_SHEET_ID …` (exit 2) | Env not loaded | Copy `.env.example`. systemd: `EnvironmentFile=` exists and `chmod 600`. |
 | `Google credentials are missing` / file not found | JSON path or PEM wrong | Set `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY`. Share the sheet with the service account as Editor. |
-| `config sheet is missing email, password, or instruments with candle timeframes` | Tab name / cells | Tab must be `config`. Labels in A, symbol in B, timeframes in C onward. |
+| `config sheet is missing email, password, or instruments with candle timeframes` | Tab name / cells | Tab must be `config`. Labels in A, symbol in B, timeframes in C–E. |
 | `unsupported exchange` / `invalid instrument` | Bad `InstrumentN` | Use `NSE\|BSE\|MCX:CATEGORY:SYMBOL`. Check `logs/error.log`. |
 | `cognito auth failed` / `NotAuthorizedException` | Bad sheet password | Confirm the `config` email/password. Cognito does not open a login UI. |
 | `cognito extra challenge` | MFA | Only `USER_PASSWORD_AUTH` with no challenge is supported. |
@@ -673,7 +660,7 @@ cp .env.example .env
 # edit .env: GOOGLE_SHEET_ID + GOOGLE_SERVICE_ACCOUNT_JSON
 # (or GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY)
 # Share the spreadsheet with the service account as Editor.
-# Fill the config tab: email, password, Instrument1..6 plus timeframes in C onward.
+# Fill the config tab: email, password, Instrument1..6 plus timeframes in C–E.
 
 ONCE=1 npm start
 ```

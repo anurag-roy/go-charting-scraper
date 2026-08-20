@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, parseSheetId, validateConfig } from './env.js';
 import { redactText } from './redact.js';
-import { isRetryableGoogleError, logTiming, timed, withRetry } from './util.js';
+import { isRetryableGoogleError, withRetry } from './util.js';
 import { jwtExpMs, AuthSession } from './cognito.js';
 
 describe('parseSheetId', () => {
@@ -89,43 +89,6 @@ describe('withRetry', () => {
   it('detects 429 as retryable', () => {
     assert.equal(isRetryableGoogleError({ code: 429 }), true);
     assert.equal(isRetryableGoogleError({ code: 400 }), false);
-  });
-});
-
-describe('logTiming', () => {
-  it('writes a grep-friendly line and skips empty fields', () => {
-    const lines = [];
-    logTiming({ info: (s) => lines.push(s) }, 'sheets append', {
-      tab: '1A',
-      rows: 2,
-      skip: '',
-      ms: 41,
-    });
-    assert.equal(lines[0], 'timing sheets append tab=1A rows=2 ms=41');
-  });
-
-  it('no-ops when the logger has no info()', () => {
-    logTiming({ warn() {} }, 'noop', { ms: 1 });
-  });
-});
-
-describe('timed', () => {
-  it('logs ms after success and rethrows after failure', async () => {
-    const lines = [];
-    const log = { info: (s) => lines.push(s) };
-    const out = await timed(async () => 9, {
-      log,
-      label: 'sheets config_read',
-      fields: { rows: 3 },
-    });
-    assert.equal(out, 9);
-    assert.match(lines[0], /^timing sheets config_read rows=3 ms=\d+$/);
-
-    await assert.rejects(
-      () => timed(async () => { throw new Error('boom'); }, { log, label: 'cognito login' }),
-      /boom/,
-    );
-    assert.match(lines[1], /^timing cognito login error=boom ms=\d+$/);
   });
 });
 

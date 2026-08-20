@@ -57,32 +57,3 @@ export function interruptibleSleep(ms, { isStopped, onRegister } = {}) {
     onRegister?.(cancel);
   });
 }
-
-export function elapsedMs(startedAt, now = Date.now()) {
-  return Math.max(0, now - startedAt);
-}
-
-/** One grep-friendly INFO line: `timing sheets append tab=1A rows=1 ms=180`. */
-export function logTiming(log, label, fields = {}) {
-  if (typeof log?.info !== 'function') return;
-  const parts = [`timing ${label}`];
-  for (const [key, value] of Object.entries(fields)) {
-    if (value === undefined || value === null || value === '') continue;
-    parts.push(`${key}=${value}`);
-  }
-  log.info(parts.join(' '));
-}
-
-export async function timed(fn, { log, label, fields } = {}) {
-  const startedAt = Date.now();
-  try {
-    const result = await fn();
-    const extra = typeof fields === 'function' ? fields(result, null) : fields;
-    logTiming(log, label, { ...(extra || {}), ms: elapsedMs(startedAt) });
-    return result;
-  } catch (err) {
-    const extra = typeof fields === 'function' ? fields(undefined, err) : fields;
-    logTiming(log, label, { ...(extra || {}), error: err?.message || err, ms: elapsedMs(startedAt) });
-    throw err;
-  }
-}

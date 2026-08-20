@@ -78,17 +78,25 @@ export function nowInSession(nowMs, hours) {
   return inSession(formatIst(new Date(nowMs)), hours);
 }
 
+export function candleCloseMs(candleTimeIso, interval, {
+  open = '09:15',
+  close = '15:40',
+} = {}) {
+  const start = Date.parse(candleTimeIso);
+  if (!Number.isFinite(start)) return NaN;
+  const dateStr = istDateString(new Date(start));
+  const { closeMs } = marketWindowMs(dateStr, open, close);
+  const naturalClose = start + intervalMinutes(interval) * 60_000;
+  return Math.min(naturalClose, closeMs);
+}
+
 export function isCandleClosed(candleTimeIso, interval, nowMs, {
   open = '09:15',
   close = '15:40',
   graceMs = 2000,
 } = {}) {
-  const start = Date.parse(candleTimeIso);
-  if (!Number.isFinite(start)) return false;
-  const dateStr = istDateString(new Date(start));
-  const { closeMs } = marketWindowMs(dateStr, open, close);
-  const naturalClose = start + intervalMinutes(interval) * 60_000;
-  const closeAt = Math.min(naturalClose, closeMs);
+  const closeAt = candleCloseMs(candleTimeIso, interval, { open, close });
+  if (!Number.isFinite(closeAt)) return false;
   return nowMs >= closeAt + Number(graceMs || 0);
 }
 

@@ -144,10 +144,8 @@ describe('SheetsSink', () => {
 
   it('appends unseen rows grouped by static slot tabs', async () => {
     const appended = [];
-    const lines = [];
     const sink = new SheetsSink({
       spreadsheetId: 'sheet',
-      log: { info: (s) => lines.push(s) },
     });
     const tab2 = sheetTabName(1, 0);
     const tab5 = sheetTabName(2, 2);
@@ -179,8 +177,6 @@ describe('SheetsSink', () => {
     assert.equal(appended[1].range, sheetA1(tab5, 'A1'));
     assert.equal(sink.incompleteKeys.has(`${tab2}\t2026-08-17T09:17:00`), true);
     assert.equal(sink.incompleteKeys.has(`${tab2}\t2026-08-17T09:15:00`), false);
-    assert.ok(lines.some((l) => /^timing sheets append tab=1A rows=2 ms=\d+$/.test(l)));
-    assert.ok(lines.some((l) => /^timing sheets write rows=3 append_tabs=2 patch_tabs=0 ms=\d+$/.test(l)));
   });
 
   it('patches existing rows that were stored without open/close', async () => {
@@ -454,6 +450,86 @@ describe('SheetsSink', () => {
     assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
     assert.equal(calls.batchUpdate.length, 0);
   });
+
+  it('checks and initializes all static headers with batched calls', async () => {
+    const calls = { meta: 0, addTabs: 0, batchGet: 0, batchRanges: 0, writeHeaders: [] };
+    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
+    sink.sheetsApi = {
+      spreadsheets: {
+        get: async () => {
+          calls.meta += 1;
+          return { data: { sheets: [] } };
+        },
+        batchUpdate: async () => {
+          calls.addTabs += 1;
+          return {};
+        },
+        values: {
+          batchGet: async (req) => {
+            calls.batchGet += 1;
+            calls.batchRanges = req.ranges.length;
+            return {
+              data: {
+                valueRanges: req.ranges.map((range, i) => (
+                  i === 0 ? { range, values: [SHEET_COLUMNS] } : { range }
+                )),
+              },
+            };
+          },
+          batchUpdate: async (req) => {
+            calls.writeHeaders.push(req);
+            return {};
+          },
+        },
+      },
+    };
+
+    await sink.ensureStaticTabs();
+    await sink.ensureStaticTabs();
+
+    assert.equal(calls.meta, 1);
+    assert.equal(calls.addTabs, 1);
+    assert.equal(calls.batchGet, 1);
+    assert.equal(calls.writeHeaders.length, 1);
+    assert.equal(calls.writeHeaders[0].requestBody.data.length, calls.batchRanges - 1);
+  });
+
+  it('appends independent tabs concurrently', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
+    const intervals = ['2m', '3m', '5m'];
+    for (let i = 0; i < intervals.length; i += 1) {
+      sink.loadedTabs.add(sheetTabName(1, i));
+    }
+    sink.sheetsApi = {
+      spreadsheets: {
+        values: {
+          append: async () => {
+            active += 1;
+            maxActive = Math.max(maxActive, active);
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            active -= 1;
+            return {};
+          },
+        },
+      },
+    };
+
+    const n = await sink.writeRows(intervals.map((interval, i) => ({
+      ok: true,
+      slot: 1,
+      intervals,
+      interval,
+      contract: 'NIFTY-I',
+      candle_time: '2026-08-17T09:' + String(15 + i).padStart(2, '0') + ':00+05:30',
+      delta: i,
+      max_delta: i,
+    })));
+
+    assert.equal(n, 3);
+    assert.equal(maxActive, 3);
+  });
 });
 
 describe('csv keys', () => {
@@ -517,13 +593,11 @@ describe('closedRowsForInterval', () => {
 });
 
 describe('ConfigSheet', () => {
-  it('reads timeframe columns C onward from the config tab', async () => {
+  it('reads timeframe columns C–E from the config tab', async () => {
     const ranges = [];
-    const lines = [];
     const sheet = new ConfigSheet({
       spreadsheetId: 'sheet',
       tab: 'config',
-      log: { info: (s) => lines.push(s) },
       sheetsApi: {
         spreadsheets: {
           values: {
@@ -534,7 +608,7 @@ describe('ConfigSheet', () => {
                   values: [
                     ['email', 'trader@example.com'],
                     ['password', 'secret'],
-                    ['Instrument1', 'NSE:FUTURE:NIFTY-I', '2m', '3m', '5m'],
+                    ['Instrument1', 'NSE:FUTURE:NIFTY-I', '2m', '3m', '5m', 'personal notes'],
                     ['Instrument2', 'NSE:OPTIONS:NIFTY2681824100CE', '5m', '10m'],
                     ['Instrument3', 'NSE:OPTIONS:NIFTY2681824300CE'],
                   ],
@@ -546,7 +620,7 @@ describe('ConfigSheet', () => {
       },
     });
     const cfg = await sheet.read();
-    assert.equal(ranges[0], sheetA1('config', 'A1:Z100'));
+    assert.equal(ranges[0], sheetA1('config', 'A1:E8'));
     assert.deepEqual(
       cfg.instruments.map((i) => ({ slot: i.slot, id: i.id, intervals: i.intervals })),
       [
@@ -555,6 +629,5 @@ describe('ConfigSheet', () => {
       ],
     );
     assert.equal(cfg.warnings.length, 1);
-    assert.match(lines[0], /^timing sheets config_read instruments=2 ms=\d+$/);
   });
 });

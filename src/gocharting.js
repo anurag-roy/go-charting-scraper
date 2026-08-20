@@ -4,7 +4,7 @@ import protobuf from 'protobufjs';
 import path from 'node:path';
 import { symbolId } from './instruments.js';
 import { formatIst } from './session.js';
-import { elapsedMs, logTiming, num, sleep } from './util.js';
+import { num, sleep } from './util.js';
 
 /**
  * Pick the lowest TS/V2 `idxs` value not already in use.
@@ -201,7 +201,6 @@ export class FootprintClient {
 
   connect(wsUrl) {
     if (wsUrl) this.wsUrl = wsUrl;
-    const startedAt = Date.now();
     return new Promise((resolve, reject) => {
       try { this.ws?.removeAllListeners(); } catch { /* ignore */ }
       try { this.ws?.close(); } catch { /* ignore */ }
@@ -250,19 +249,7 @@ export class FootprintClient {
         this.failPending(`ws closed ${code}`);
       });
       ws.on('message', (data, isBinary) => this.onMessage(data, isBinary));
-    }).then(
-      (value) => {
-        logTiming(this.log, 'gocharting ws_connect', { ms: elapsedMs(startedAt) });
-        return value;
-      },
-      (err) => {
-        logTiming(this.log, 'gocharting ws_connect', {
-          error: err?.message || err,
-          ms: elapsedMs(startedAt),
-        });
-        throw err;
-      },
-    );
+    });
   }
 
   send(obj) {
@@ -382,7 +369,6 @@ export class FootprintClient {
   requestOne(instrument, interval, dates, timeoutMs) {
     const request_id = this.nextId++;
     const symbolKey = symbolId(instrument);
-    const startedAt = Date.now();
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (!this.pending.has(String(request_id))) return;
@@ -411,28 +397,7 @@ export class FootprintClient {
           session: this.sessionType,
         },
       });
-    }).then(
-      (result) => {
-        logTiming(this.log, 'gocharting FOOTPRINT', {
-          symbol: symbolKey,
-          interval,
-          candles: result?.candles?.length || 0,
-          ok: Boolean(result?.ok),
-          ...(result?.error ? { error: result.error } : {}),
-          ms: elapsedMs(startedAt),
-        });
-        return result;
-      },
-      (err) => {
-        logTiming(this.log, 'gocharting FOOTPRINT', {
-          symbol: symbolKey,
-          interval,
-          error: err?.message || err,
-          ms: elapsedMs(startedAt),
-        });
-        throw err;
-      },
-    );
+    });
   }
 
   async requestInterval(instrument, interval, dates, timeoutMs = 10_000) {
@@ -486,7 +451,6 @@ export class FootprintClient {
     const request_id = this.nextId++;
     const symbolKey = symbolId(instrument);
     const idx = this.#allocOhlcIdx();
-    const startedAt = Date.now();
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (!this.pending.has(String(request_id))) return;
@@ -517,27 +481,6 @@ export class FootprintClient {
           idxs: [idx],
         },
       });
-    }).then(
-      (result) => {
-        logTiming(this.log, 'gocharting OHLC', {
-          symbol: symbolKey,
-          interval,
-          bars: result?.bars?.length || 0,
-          ok: Boolean(result?.ok),
-          ...(result?.error ? { error: result.error } : {}),
-          ms: elapsedMs(startedAt),
-        });
-        return result;
-      },
-      (err) => {
-        logTiming(this.log, 'gocharting OHLC', {
-          symbol: symbolKey,
-          interval,
-          error: err?.message || err,
-          ms: elapsedMs(startedAt),
-        });
-        throw err;
-      },
-    );
+    });
   }
 }
