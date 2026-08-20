@@ -445,7 +445,10 @@ export class SheetsSink {
             spreadsheetId: this.spreadsheetId,
             range: sheetA1(tab, 'A1'),
             valueInputOption: 'RAW',
-            insertDataOption: 'INSERT_ROWS',
+            // Avoid structurally inserting a row for every candle. Inserting rows
+            // can make formulas on derived tabs adjust their source ranges and
+            // unintentionally leave newly appended candles outside those ranges.
+            insertDataOption: 'OVERWRITE',
             requestBody: { values: stillNew.map(rowToSheetValues) },
           }),
           retryOpts(this.log, `append ${tab}`),

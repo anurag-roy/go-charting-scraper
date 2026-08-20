@@ -497,6 +497,7 @@ describe('SheetsSink', () => {
   it('appends independent tabs concurrently', async () => {
     let active = 0;
     let maxActive = 0;
+    const appendRequests = [];
     const sink = new SheetsSink({ spreadsheetId: 'sheet' });
     const intervals = ['2m', '3m', '5m'];
     for (let i = 0; i < intervals.length; i += 1) {
@@ -505,7 +506,8 @@ describe('SheetsSink', () => {
     sink.sheetsApi = {
       spreadsheets: {
         values: {
-          append: async () => {
+          append: async (req) => {
+            appendRequests.push(req);
             active += 1;
             maxActive = Math.max(maxActive, active);
             await new Promise((resolve) => setTimeout(resolve, 10));
@@ -529,6 +531,8 @@ describe('SheetsSink', () => {
 
     assert.equal(n, 3);
     assert.equal(maxActive, 3);
+    assert.equal(appendRequests.length, 3);
+    assert.equal(appendRequests.every((req) => req.insertDataOption === 'OVERWRITE'), true);
   });
 });
 
