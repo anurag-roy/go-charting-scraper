@@ -136,6 +136,16 @@ export function persistSessionDate(nowMs, { open = '09:15' } = {}) {
   return istDateString(new Date(nowMs));
 }
 
+/**
+ * Date whose rows stay on the sheet.
+ * Production keeps the IST calendar day. `LAST_WORKING_DAY=1` keeps the
+ * persist session so overnight / weekend testing can reuse yesterday.
+ */
+export function keepSheetDate(nowMs, hours = {}, { lastWorkingDay = false } = {}) {
+  if (lastWorkingDay) return persistSessionDate(nowMs, hours);
+  return istDateString(new Date(nowMs));
+}
+
 export function sessionDatesFor(nowMs, { open = '09:15' } = {}) {
   const persist = persistSessionDate(nowMs, { open });
   const today = istDateString(new Date(nowMs));
