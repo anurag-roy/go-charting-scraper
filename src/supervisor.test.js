@@ -297,6 +297,91 @@ describe('Supervisor instrument hot-swap', () => {
     assert.equal(supervisor.instrumentState.get(x.slot).retainedDate, '2026-08-18');
   });
 
+  it('keeps and backfills the last working day after midnight when the flag is set', async () => {
+    const retained = [];
+    const requested = [];
+    const wroteTimes = [];
+    const x = inst('NSE:FUTURE:NIFTY-I', ['5m'], 1);
+    const twoAm = Date.parse('2026-08-18T02:00:00+05:30');
+    const sink = {
+      async ensureStaticTabs() {},
+      async ensureInstrument() {},
+      dropInstrument() {},
+      async retainSession(instrument, dateStr) {
+        retained.push(dateStr);
+        return 0;
+      },
+      async writeRows(rows) {
+        wroteTimes.push(...rows.map((r) => r.candle_time));
+        return rows.length;
+      },
+    };
+    const client = {
+      isOpen: () => true,
+      ws: { readyState: 1 },
+      dropSymbol() {},
+      async disconnect() {},
+      async connect() {},
+      ohlcCollector: { getBars() { return []; } },
+      async requestInterval(instrument, interval, dates) {
+        requested.push({ interval, dates: [...(dates || [])] });
+        return {
+          ok: true,
+          candles: [{
+            date: '2026-08-17T09:15:00+05:30',
+            totals: { buy: { volume: 2 }, sell: { volume: 1 } },
+            max: { buy: { volume: 2 }, sell: { volume: 1 } },
+            footprint: [{ level: 1, buy: { volume: 2 }, sell: { volume: 1 } }],
+          }],
+        };
+      },
+      async requestOhlc() {
+        return {
+          ok: true,
+          bars: [{ time: '2026-08-17T09:15:00+05:30', open: 1, high: 1, low: 1, close: 1, volume: 1, oi: 1 }],
+        };
+      },
+    };
+
+    const off = new Supervisor({
+      cfg: baseCfg(),
+      log: silentLog(),
+      configSheet: { read: async () => ({}) },
+      sink,
+      auth: mockAuth(),
+      client,
+      now: () => twoAm,
+    });
+    off.liveConfig = { email: 'a@b.c', password: 'pw' };
+    await off.reconcile([x]);
+    const wroteOff = await off.sampleDue(true);
+    assert.equal(retained.at(-1), '2026-08-18');
+    assert.equal(wroteOff, 0);
+    assert.deepEqual(requested, []);
+
+    retained.length = 0;
+    requested.length = 0;
+    wroteTimes.length = 0;
+    const on = new Supervisor({
+      cfg: { ...baseCfg(), lastWorkingDay: true },
+      log: silentLog(),
+      configSheet: { read: async () => ({}) },
+      sink,
+      auth: mockAuth(),
+      client,
+      now: () => twoAm,
+    });
+    on.liveConfig = { email: 'a@b.c', password: 'pw' };
+    await on.reconcile([x]);
+    const wroteOn = await on.sampleDue(true);
+    assert.equal(retained.at(-1), '2026-08-17');
+    assert.equal(on.instrumentState.get(x.slot).retainedDate, '2026-08-17');
+    assert.equal(wroteOn > 0, true);
+    assert.equal(wroteTimes[0], '2026-08-17T09:15:00+05:30');
+    assert.equal(requested.length > 0, true);
+    assert.equal(requested[0].dates.includes('2026-08-17'), true);
+  });
+
   it('requests only intervals whose current candle can have closed', async () => {
     let nowMs = Date.parse('2026-08-17T10:00:03+05:30');
     const requested = [];

@@ -33,6 +33,25 @@ describe('loadConfig protoDir', () => {
   });
 });
 
+describe('LAST_WORKING_DAY flag', () => {
+  it('is off by default and on for 1/true/yes', () => {
+    const prev = process.env.LAST_WORKING_DAY;
+    try {
+      delete process.env.LAST_WORKING_DAY;
+      assert.equal(loadConfig().lastWorkingDay, false);
+      process.env.LAST_WORKING_DAY = '1';
+      assert.equal(loadConfig().lastWorkingDay, true);
+      process.env.LAST_WORKING_DAY = 'true';
+      assert.equal(loadConfig().lastWorkingDay, true);
+      process.env.LAST_WORKING_DAY = '0';
+      assert.equal(loadConfig().lastWorkingDay, false);
+    } finally {
+      if (prev === undefined) delete process.env.LAST_WORKING_DAY;
+      else process.env.LAST_WORKING_DAY = prev;
+    }
+  });
+});
+
 describe('validateConfig', () => {
   it('requires a sheet id and Google credentials, not GoCharting env vars', () => {
     const errs = validateConfig({

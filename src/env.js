@@ -81,6 +81,7 @@ export function loadConfig() {
     errorLogPath: process.env.ERROR_LOG_PATH || path.join(repoRoot, 'logs', 'error.log'),
     statusPath: process.env.STATUS_PATH || path.join(repoRoot, 'logs', 'status.json'),
     once: flag('ONCE'),
+    lastWorkingDay: flag('LAST_WORKING_DAY'),
     debugJsonl: flag('DEBUG_JSONL'),
     outDir: process.env.OUT_DIR || path.join(repoRoot, 'logs'),
     protoDir: process.env.PROTO_DIR
