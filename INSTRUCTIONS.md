@@ -298,6 +298,13 @@ ONCE=1 npm start
 backfill already-closed candles for today’s session (if the market is open
 or already closed today), then exit. Use this as a smoke test before systemd.
 
+After midnight / before the next open, `ONCE=1` alone idles (sheets keep
+only the IST calendar day). To pull the last weekday session for testing:
+
+```bash
+LAST_WORKING_DAY=1 ONCE=1 npm start
+```
+
 ### Success looks like
 
 ```text
@@ -357,6 +364,7 @@ spreadsheet id are required.
 | `WS_TAG` | `go-charting-scraper` | `tag=` query param on the WebSocket URL |
 | `WS_HOST` | derived from `WS_DC` | Full `wss://…` override |
 | `ONCE` | unset / false | `1` → one sample then exit |
+| `LAST_WORKING_DAY` | unset / false | `1` → keep and backfill the last weekday session (overnight / weekend testing). Leave unset in production. |
 | `WRITE_CSV` | unset / false | Also append a wide debug CSV |
 | `CSV_PATH` | `logs/maxvol.csv` | CSV destination |
 | `ERROR_LOG_PATH` | `logs/error.log` | Rotating error log |

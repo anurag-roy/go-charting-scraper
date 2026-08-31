@@ -64,6 +64,26 @@ describe('workForInstrument', () => {
     assert.equal(persistSessionDate(mondayMorning, { open: '09:15' }), '2026-08-14');
     assert.equal(workForInstrument(NSE, mondayMorning, {}).action, 'idle');
   });
+
+  it('backfills the last working day overnight when LAST_WORKING_DAY is set', () => {
+    const extra = { lastWorkingDay: true };
+    const twoAm = Date.parse('2026-08-18T02:00:00+05:30');
+    assert.equal(persistSessionDate(twoAm, { open: '09:15' }), '2026-08-17');
+    assert.equal(workForInstrument(NSE, twoAm, {}).action, 'idle');
+    assert.equal(workForInstrument(NSE, twoAm, {}, extra).action, 'backfill');
+    assert.equal(workForInstrument(NSE, twoAm, {}, extra).persistDate, '2026-08-17');
+    assert.equal(
+      workForInstrument(NSE, twoAm, { backfilledSessionDate: '2026-08-17' }, extra).action,
+      'idle',
+    );
+
+    const sat = Date.parse('2026-08-15T12:00:00+05:30');
+    assert.equal(workForInstrument(NSE, sat, {}, extra).action, 'backfill');
+    assert.equal(workForInstrument(NSE, sat, {}, extra).persistDate, '2026-08-14');
+
+    const live = Date.parse('2026-08-17T10:00:00+05:30');
+    assert.equal(workForInstrument(NSE, live, {}, extra).action, 'sample');
+  });
 });
 
 describe('MCX last-bar close', () => {

@@ -8,8 +8,8 @@ import {
   reconcileInstruments,
 } from './instruments.js';
 import { sheetTabName } from './columns.js';
-import { earliestOpenMs, workForInstrument } from './market.js';
-import { formatIst, istDateString, sessionDatesFor } from './session.js';
+import { earliestOpenMs, hoursForExchange, workForInstrument } from './market.js';
+import { formatIst, keepSheetDate, sessionDatesFor } from './session.js';
 import { sampleInstruments } from './collect.js';
 import { writeStatus } from './log.js';
 import { interruptibleSleep } from './util.js';
@@ -121,6 +121,7 @@ export class Supervisor {
       configTab: this.cfg.configTab,
       configPollMs: this.cfg.configPollMs,
       sampleMs: this.cfg.sampleMs,
+      lastWorkingDay: Boolean(this.cfg.lastWorkingDay),
     });
     this.loops = [
       this.#configLoop(),
@@ -183,6 +184,7 @@ export class Supervisor {
     const extra = {
       afterCloseBufferMs: this.cfg.afterCloseBufferMs,
       graceMs: this.cfg.closeGraceMs,
+      lastWorkingDay: this.cfg.lastWorkingDay,
     };
     const due = [];
     for (const inst of this.liveInstruments) {
@@ -338,15 +340,17 @@ export class Supervisor {
     }
   }
 
-  /** Drop sheet rows that are not from today's IST calendar date. */
+  /** Drop sheet rows that are not from the keep-date (IST today, or last session). */
   async retainCurrentDay() {
-    const today = istDateString(new Date(this.now()));
+    const nowMs = this.now();
     const dropped = await Promise.all(this.liveInstruments.map(async (inst) => {
       const state = this.#stateFor(inst);
-      if (state.retainedDate === today) return 0;
-      const n = await this.sink.retainSession(inst, today);
+      const hours = hoursForExchange(inst.exchange, nowMs);
+      const dateStr = keepSheetDate(nowMs, hours, { lastWorkingDay: this.cfg.lastWorkingDay });
+      if (state.retainedDate === dateStr) return 0;
+      const n = await this.sink.retainSession(inst, dateStr);
       if (n > 0) this.log.info(`removed ${n} previous-day row(s) for ${inst.id}`);
-      state.retainedDate = today;
+      state.retainedDate = dateStr;
       this.instrumentState.set(this.#stateKey(inst), state);
       return n;
     }));

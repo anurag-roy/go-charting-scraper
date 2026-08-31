@@ -250,7 +250,9 @@ Allow it for this folder.
 
 Do this once, any time you have internet. It reads `config`, logs in,
 creates any missing `1A` / `1B` / `1C` tabs, writes already-closed candles
-for the current (or last weekday) session, then **exits**.
+for **today’s** session, then **exits**. After midnight (or before 09:15
+IST) that writes nothing unless you also set `LAST_WORKING_DAY=1`, which
+pulls the last weekday instead — useful if you are testing at 2 AM.
 
 Double-click **`start-once.bat`**, or in a terminal:
 
@@ -260,10 +262,25 @@ set ONCE=1
 npm start
 ```
 
+Late at night (after the IST date has rolled):
+
+```bat
+cd C:\Users\<you>\go-charting-scraper
+set LAST_WORKING_DAY=1
+set ONCE=1
+npm start
+```
+
 In **PowerShell** the `set` line is different:
 
 ```powershell
 cd C:\Users\<you>\go-charting-scraper
+$env:ONCE = "1"
+npm start
+```
+
+```powershell
+$env:LAST_WORKING_DAY = "1"
 $env:ONCE = "1"
 npm start
 ```

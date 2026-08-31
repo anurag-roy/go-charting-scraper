@@ -29,7 +29,8 @@ WebSocket + Protobuf protocol; schemas live in [`src/proto/`](src/proto/).
    timeframe letter: `Instrument1` → `1A`, `1B`, `1C`, `Instrument2` → `2A`,
    `2B`, `2C`, and so on (column C → A, D → B, E → C). Forming bars are never
    written. Each tab keeps **only the current IST day’s rows**; previous-day
-   candles are deleted in the morning.
+   candles are deleted in the morning. Set `LAST_WORKING_DAY=1` to keep and
+   backfill the last weekday session instead (for testing after midnight).
 5. If you change a slot’s symbol or timeframes during the session, those same
    tabs are **overwritten** (the sheet names never change, and sheets are never
    deleted). The new symbol/timeframe is backfilled for **today’s** session
@@ -96,6 +97,7 @@ cp .env.example .env   # GOOGLE_SHEET_ID + GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_
 npm ci
 npm start              # 24x7
 ONCE=1 npm start       # one config read + one sample, then exit
+LAST_WORKING_DAY=1 ONCE=1 npm start   # last weekday session (late-night testing)
 npm test
 npm run pack           # dist/go-charting-scraper-<version>.zip (no git / tests)
 ```

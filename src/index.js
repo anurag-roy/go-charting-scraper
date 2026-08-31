@@ -87,7 +87,12 @@ export async function main() {
     process.exit(1);
   });
 
-  log.info('go-charting-scraper', { at: istNow(), once: cfg.once, sheet: cfg.sheetId });
+  log.info('go-charting-scraper', {
+    at: istNow(),
+    once: cfg.once,
+    lastWorkingDay: cfg.lastWorkingDay,
+    sheet: cfg.sheetId,
+  });
 
   try {
     if (cfg.once) await supervisor.runOnce();

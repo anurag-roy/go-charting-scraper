@@ -6,6 +6,7 @@ import {
   isBeforeOpen,
   isAfterClose,
   persistSessionDate,
+  keepSheetDate,
   isPersistableCandle,
   intervalMinutes,
   marketWindowMs,
@@ -53,6 +54,16 @@ describe('NSE session window', () => {
 
   it('walks back over the weekend to Friday', () => {
     assert.equal(persistSessionDate(Date.parse('2026-08-15T10:25:00+05:30'), SESSION), '2026-08-14');
+  });
+
+  it('walks back before open, including after midnight, to the last weekday', () => {
+    assert.equal(persistSessionDate(Date.parse('2026-08-18T02:00:00+05:30'), SESSION), '2026-08-17');
+    assert.equal(persistSessionDate(Date.parse('2026-08-18T03:00:00+05:30'), SESSION), '2026-08-17');
+    assert.equal(keepSheetDate(Date.parse('2026-08-18T02:00:00+05:30'), SESSION), '2026-08-18');
+    assert.equal(
+      keepSheetDate(Date.parse('2026-08-18T02:00:00+05:30'), SESSION, { lastWorkingDay: true }),
+      '2026-08-17',
+    );
   });
 
   it('drops candles from a different session date', () => {
