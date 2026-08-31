@@ -62,6 +62,7 @@ the market-data WebSocket, and for each configured instrument persists every
 | `volume` | Footprint candle volume |
 | `oi_change` | This bar’s open interest minus the previous bar’s |
 | `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, ticks ÷ 100, 2 decimal places |
+| `max_vol_b_level` / `max_vol_s_level` | Price where that max buy / sell volume printed, ticks ÷ 100 |
 
 The in-progress (forming) candle is **not** written. After a bar’s end the
 process waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the

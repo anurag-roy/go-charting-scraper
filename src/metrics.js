@@ -23,6 +23,8 @@ function hasOwn(obj, ...keys) {
  * Delta is buy volume minus sell volume (not options-Greeks delta).
  * Max/min delta are the server's intra-bar cumulative-delta extremes.
  * POC is the price level with the most total (buy+sell) volume.
+ * Max buy/sell prices (`max_vol_b_level` / `max_vol_s_level`) are the
+ * footprint `level` where that candle's largest buy / sell volume printed.
  */
 export function footprintMetrics(candle) {
   const levels = candle?.footprint || [];

@@ -14,13 +14,26 @@ export const SHEET_COLUMNS = [
   'volume',
   'oi_change',
   'vwap',
+  // Appended so existing A–N formula refs (through `vwap`) stay put.
+  'max_vol_b_level',
+  'max_vol_s_level',
 ];
 
-/** GoCharting stores prices as integer ticks; sheet OHLC/VWAP are ticks / 100. */
+/** GoCharting stores prices as integer ticks; sheet OHLC/VWAP/max-vol prices are ticks / 100. */
 export const SHEET_PRICE_SCALE = 100;
-const SHEET_PRICE_COLUMNS = new Set(['open', 'high', 'low', 'close', 'vwap']);
+const SHEET_PRICE_COLUMNS = new Set([
+  'open',
+  'high',
+  'low',
+  'close',
+  'vwap',
+  'max_vol_b_level',
+  'max_vol_s_level',
+]);
 
 const VWAP_HEADER_ALIASES = ['vwap', 'vwap1', 'vwap2'];
+/** Columns added after the previous sheet schema; ignored when matching legacy headers. */
+const SHEET_SCHEMA_EXTENSIONS = new Set(['max_vol_b_level', 'max_vol_s_level']);
 
 /** Wider debug schema for optional local CSV. */
 export const COLUMNS = [
@@ -236,9 +249,30 @@ export function sheetRowMissingMaxDelta(header, values) {
   return !isFilledOhlcValue(values?.[i]);
 }
 
-/** Rows that should be rewritten on a later sample (blank OHLC and/or blank max_delta). */
+function sheetVolumeAt(header, values, name) {
+  const i = (header || []).indexOf(name);
+  if (i < 0) return 0;
+  const n = Number(values?.[i]);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** True when max buy/sell volume is present but the matching price cell is blank. */
+export function sheetRowMissingMaxVolPrice(header, values) {
+  const cols = Array.isArray(header) && header.length ? header : SHEET_COLUMNS;
+  const missing = (volCol, priceCol) => {
+    const i = cols.indexOf(priceCol);
+    if (i < 0) return false;
+    if (sheetVolumeAt(cols, values, volCol) <= 0) return false;
+    return !isFilledOhlcValue(values?.[i]);
+  };
+  return missing('max_vol_b', 'max_vol_b_level') || missing('max_vol_s', 'max_vol_s_level');
+}
+
+/** Rows that should be rewritten on a later sample (blank OHLC, max_delta, and/or max-vol prices). */
 export function sheetRowNeedsPatch(header, values) {
-  return sheetRowMissingOhlc(header, values) || sheetRowMissingMaxDelta(header, values);
+  return sheetRowMissingOhlc(header, values)
+    || sheetRowMissingMaxDelta(header, values)
+    || sheetRowMissingMaxVolPrice(header, values);
 }
 
 export function selectSheetWrites(keys, incompleteKeys, rows, tabForRow) {
@@ -320,7 +354,9 @@ export function isPrefixHeader(header, columns) {
 }
 
 function vwapLegacyHeaders(columns) {
-  const base = (columns || []).filter((c) => !VWAP_HEADER_ALIASES.includes(c));
+  const base = (columns || []).filter((c) => (
+    !VWAP_HEADER_ALIASES.includes(c) && !SHEET_SCHEMA_EXTENSIONS.has(c)
+  ));
   return [
     [...base, 'vwap'],
     [...base, 'vwap1'],

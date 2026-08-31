@@ -50,6 +50,7 @@ footprint candles back into that same spreadsheet.
 | `volume` | Footprint candle volume |
 | `oi_change` | This bar’s open interest minus the previous bar’s |
 | `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, ticks ÷ 100, 2 decimal places |
+| `max_vol_b_level` / `max_vol_s_level` | Price where that max buy / sell volume printed, ticks ÷ 100 |
 
 The candle that is still forming is **not** written. After a bar ends, the
 process waits about 2 seconds, then appends the row. Restarts skip times

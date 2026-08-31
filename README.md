@@ -74,13 +74,14 @@ Each static tab (`1A`, `1B`, `1C`, …) uses this schema:
 | `volume` | Footprint candle volume |
 | `oi_change` | Change in open interest vs the previous OHLC bar |
 | `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, ticks ÷ 100, 2 decimal places |
+| `max_vol_b_level` / `max_vol_s_level` | Price where that max buy / sell volume printed, ticks ÷ 100 |
 
 ## Derived tabs and formulas
 
 Formulas on another tab in the same spreadsheet should recalculate when the
 scraper writes a closed candle. Reference the data tabs directly (do not use
 `IMPORTRANGE` for tabs in the same spreadsheet), and make the source range large
-enough for later candles. For example, use `'1A'!A2:N1000` rather than a range
+enough for later candles. For example, use `'1A'!A2:P1000` rather than a range
 ending at the current last row. The scraper appends values without structurally
 inserting rows, so formula references remain stable.
 
