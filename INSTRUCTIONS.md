@@ -62,6 +62,7 @@ the market-data WebSocket, and for each configured instrument persists every
 | `volume` | Footprint candle volume |
 | `oi_change` | This bar’s open interest minus the previous bar’s |
 | `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, ticks ÷ 100, 2 decimal places |
+| `max_vol_b_level` / `max_vol_s_level` | Price where that max buy / sell volume printed, ticks ÷ 100 |
 
 The in-progress (forming) candle is **not** written. After a bar’s end the
 process waits `CLOSE_GRACE_MS` (default 2s) so the server can finalize the
@@ -389,7 +390,8 @@ The eighteen tabs `1A`–`6C` are created if missing and **never deleted**.
 Point VLOOKUP / INDEX formulas at those names; they stay stable when you
 change a symbol or timeframe. Column Z on each data tab records which
 instrument and interval currently occupy it (`1|2m|NSE:FUTURE:NIFTY-I`).
-Leave A:N for your formulas (column A is the contract `symbol`).
+Leave A:P for your formulas (column A is the contract `symbol`; O–P are
+`max_vol_b_level` / `max_vol_s_level`). A–N through `vwap` stay in place.
 
 If you change the symbol or a timeframe cell while the market is open, the
 scraper **overwrites the rows inside** that slot’s tabs and backfills today.

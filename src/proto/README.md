@@ -20,4 +20,6 @@ pako/deflate blob that inflates into an `m` frame.
 
 **Max Vol B / Max Vol S** are `FootPrintCandle.max.buy.volume` /
 `max.sell.volume` — the largest buy / sell volume at any single price level
-in that candle. The client does not re-aggregate them.
+in that candle. The client does not re-aggregate those volumes. The matching
+prices (`max_vol_b_level` / `max_vol_s_level`) are the `Footprint.level`
+whose buy / sell volume is that max.

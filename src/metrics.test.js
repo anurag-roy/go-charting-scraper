@@ -22,8 +22,30 @@ describe('footprintMetrics', () => {
     assert.equal(m.max_delta, 80);
     assert.equal(m.volume, 150);
     assert.equal(m.poc, 100);
+    assert.equal(m.max_vol_b, 50);
+    assert.equal(m.max_vol_s, 30);
+    assert.equal(m.max_vol_b_level, 100);
+    assert.equal(m.max_vol_s_level, 100);
     assert.equal(m.values_match, true);
     assert.equal(m.vwap2, undefined);
+  });
+
+  it('records the price of max buy and max sell when they differ', () => {
+    const m = footprintMetrics({
+      date: '2026-08-17T10:00:00+05:30',
+      totals: { buy: { volume: 80 }, sell: { volume: 70 } },
+      max: { buy: { volume: 50 }, sell: { volume: 40 } },
+      footprint: [
+        { level: 241200, buy: { volume: 50 }, sell: { volume: 5 } },
+        { level: 241250, buy: { volume: 20 }, sell: { volume: 40 } },
+        { level: 241300, buy: { volume: 10 }, sell: { volume: 25 } },
+      ],
+    });
+    assert.equal(m.max_vol_b, 50);
+    assert.equal(m.max_vol_s, 40);
+    assert.equal(m.max_vol_b_level, 241200);
+    assert.equal(m.max_vol_s_level, 241250);
+    assert.equal(m.poc, 241250);
   });
 
   it('treats omitted proto3 max_delta as 0, not blank', () => {
