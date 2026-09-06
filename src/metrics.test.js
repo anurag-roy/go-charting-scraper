@@ -48,6 +48,25 @@ describe('footprintMetrics', () => {
     assert.equal(m.poc, 241250);
   });
 
+  it('uses footprint quantities when server max.buy.volume is the price', () => {
+    const m = footprintMetrics({
+      date: '2026-09-04T09:15:00+05:30',
+      totals: { buy: { volume: 8000 }, sell: { volume: 5000 } },
+      max: { buy: { volume: 13650 }, sell: { volume: 13010 } },
+      footprint: [
+        { level: 13650, buy: { volume: 4200 }, sell: { volume: 800 } },
+        { level: 13010, buy: { volume: 900 }, sell: { volume: 3100 } },
+      ],
+    });
+    assert.equal(m.max_vol_b, 4200);
+    assert.equal(m.max_vol_s, 3100);
+    assert.equal(m.max_vol_b_level, 13650);
+    assert.equal(m.max_vol_s_level, 13010);
+    assert.equal(m.recomputed_max_b, 4200);
+    assert.equal(m.recomputed_max_s, 3100);
+    assert.equal(m.values_match, false);
+  });
+
   it('treats omitted proto3 max_delta as 0, not blank', () => {
     const m = footprintMetrics({
       date: '2026-08-19T10:25:00+05:30',

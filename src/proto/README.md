@@ -18,8 +18,10 @@ Binary frames: byte `0x6d` (`m`) is `uint32be` header length + UTF-8 header
 `COMMAND~cursor~request_id~…` + protobuf body. Any other first byte is a
 pako/deflate blob that inflates into an `m` frame.
 
-**Max Vol B / Max Vol S** are `FootPrintCandle.max.buy.volume` /
-`max.sell.volume` — the largest buy / sell volume at any single price level
-in that candle. The client does not re-aggregate those volumes. The matching
-prices (`max_vol_b_level` / `max_vol_s_level`) are the `Footprint.level`
-whose buy / sell volume is that max.
+**Max Vol B / Max Vol S** are the largest `footprint[].buy.volume` /
+`footprint[].sell.volume` in that candle (recomputed on the client).
+`FootPrintCandle.max.buy.volume` / `max.sell.volume` may carry the *price*
+of that max (ticks), not the quantity; writing those fields produced
+`level * 100` in the sheet. The matching prices (`max_vol_b_level` /
+`max_vol_s_level`) are the `Footprint.level` whose buy / sell volume is
+that max.

@@ -23,8 +23,11 @@ function hasOwn(obj, ...keys) {
  * Delta is buy volume minus sell volume (not options-Greeks delta).
  * Max/min delta are the server's intra-bar cumulative-delta extremes.
  * POC is the price level with the most total (buy+sell) volume.
- * Max buy/sell prices (`max_vol_b_level` / `max_vol_s_level`) are the
- * footprint `level` where that candle's largest buy / sell volume printed.
+ * Max buy/sell quantities (`max_vol_b` / `max_vol_s`) are the largest
+ * `footprint[].buy.volume` / `sell.volume` in the candle — not
+ * `candle.max.buy/sell.volume`, which is the price of that max (ticks).
+ * Max buy/sell prices (`max_vol_b_level` / `max_vol_s_level`) are that
+ * footprint `level`.
  */
 export function footprintMetrics(candle) {
   const levels = candle?.footprint || [];
@@ -77,13 +80,16 @@ export function footprintMetrics(candle) {
 
   const esHigh = num(es.high);
   const esLow = num(es.low);
+  // candle.max.buy/sell.volume is documented as max quantity, but the live
+  // feed stores the price of that max (ticks). The sheet then showed
+  // level * 100 instead of lots. Always take quantity from footprint[].
   const serverBuy = num(candle?.max?.buy?.volume);
   const serverSell = num(candle?.max?.sell?.volume);
 
   return {
     candle_time: candle?.date || '',
-    max_vol_b: serverBuy,
-    max_vol_s: serverSell,
+    max_vol_b: maxBuy,
+    max_vol_s: maxSell,
     totals_buy: totalsBuy,
     totals_sell: totalsSell,
     volume,

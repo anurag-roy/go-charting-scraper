@@ -268,11 +268,31 @@ export function sheetRowMissingMaxVolPrice(header, values) {
   return missing('max_vol_b', 'max_vol_b_level') || missing('max_vol_s', 'max_vol_s_level');
 }
 
-/** Rows that should be rewritten on a later sample (blank OHLC, max_delta, and/or max-vol prices). */
+/**
+ * True when a stored max-vol cell is the unscaled price (level × 100)
+ * rather than lots. Those rows are rewritten on the next sample.
+ */
+export function sheetRowHasPriceAsMaxVol(header, values) {
+  const cols = Array.isArray(header) && header.length ? header : SHEET_COLUMNS;
+  const isPrice = (volCol, priceCol) => {
+    const iVol = cols.indexOf(volCol);
+    const iPx = cols.indexOf(priceCol);
+    if (iVol < 0 || iPx < 0) return false;
+    if (!isFilledOhlcValue(values?.[iVol]) || !isFilledOhlcValue(values?.[iPx])) return false;
+    const vol = Number(values[iVol]);
+    const px = Number(values[iPx]);
+    if (!Number.isFinite(vol) || !Number.isFinite(px) || vol <= 0) return false;
+    return Math.abs(vol - Math.round(px * SHEET_PRICE_SCALE)) < 0.5;
+  };
+  return isPrice('max_vol_b', 'max_vol_b_level') || isPrice('max_vol_s', 'max_vol_s_level');
+}
+
+/** Rows that should be rewritten on a later sample (blank OHLC, max_delta, max-vol prices, or price-as-volume). */
 export function sheetRowNeedsPatch(header, values) {
   return sheetRowMissingOhlc(header, values)
     || sheetRowMissingMaxDelta(header, values)
-    || sheetRowMissingMaxVolPrice(header, values);
+    || sheetRowMissingMaxVolPrice(header, values)
+    || sheetRowHasPriceAsMaxVol(header, values);
 }
 
 export function selectSheetWrites(keys, incompleteKeys, rows, tabForRow) {
