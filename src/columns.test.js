@@ -15,7 +15,6 @@ import {
   sheetDisplaySymbol,
   sheetMaxDelta,
   sheetRowMissingOhlc,
-  sheetRowHasPriceAsMaxVol,
   sheetRowNeedsPatch,
   sheetTabName,
   allStaticTabNames,
@@ -155,23 +154,6 @@ describe('sheet helpers', () => {
       'NIFTY-I', '2026-08-19T10:25:00', 2412.8, 2412.8, 2412.1, 2412.14, -3770, 0, 0, 0, 241250, 12610, -2145, 2414.67, '', '',
     ];
     assert.equal(sheetRowNeedsPatch(SHEET_COLUMNS, noVolume), false);
-  });
-
-  it('treats max_vol cells that are level × 100 as incomplete', () => {
-    const priceAsVol = [
-      'CRUDEOIL-I', '2026-09-04T09:15:00', 136.5, 137, 130.1, 134.2, 1, 2, 13650, 13010, 13650, 5337020, -28730, 133.4, 136.5, 130.1,
-    ];
-    assert.equal(sheetRowHasPriceAsMaxVol(SHEET_COLUMNS, priceAsVol), true);
-    assert.equal(sheetRowNeedsPatch(SHEET_COLUMNS, priceAsVol), true);
-    const oneSide = [
-      'CRUDEOIL-I', '2026-09-04T09:15:00', 136.5, 137, 130.1, 134.2, 1, 2, 13650, 3100, 13650, 5337020, -28730, 133.4, 136.5, 130.1,
-    ];
-    assert.equal(sheetRowHasPriceAsMaxVol(SHEET_COLUMNS, oneSide), true);
-    const lots = [
-      'CRUDEOIL-I', '2026-09-04T09:15:00', 136.5, 137, 130.1, 134.2, 1, 2, 4200, 3100, 13650, 5337020, -28730, 133.4, 136.5, 130.1,
-    ];
-    assert.equal(sheetRowHasPriceAsMaxVol(SHEET_COLUMNS, lots), false);
-    assert.equal(sheetRowNeedsPatch(SHEET_COLUMNS, lots), false);
   });
 });
 
@@ -345,74 +327,6 @@ describe('SheetsSink', () => {
     assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][14], 2412.5);
     assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][15], 2412.1);
     assert.equal(sink.incompleteKeys.has(`${tab}\t2026-08-19T10:25:00`), false);
-  });
-
-  it('patches stored max_vol_b/s that are the buy/sell price × 100', async () => {
-    const tab = sheetTabName(3, 0);
-    const sink = new SheetsSink({ spreadsheetId: 'sheet' });
-    sink.loadedTabs.add(tab);
-    sink.keys.add(`${tab}\t2026-09-04T09:15:00`);
-    sink.incompleteKeys.add(`${tab}\t2026-09-04T09:15:00`);
-    const calls = { get: [], batchUpdate: [], append: [] };
-    sink.sheetsApi = {
-      spreadsheets: {
-        values: {
-          get: async () => {
-            calls.get.push(true);
-            return {
-              data: {
-                values: [
-                  SHEET_COLUMNS,
-                  ['CRUDEOIL-I', '2026-09-04T09:15:00', 136.5, 137, 130.1, 134.2, 1, 2, 13650, 13010, 13650, 5337020, -28730, 133.4, 136.5, 130.1],
-                ],
-              },
-            };
-          },
-          batchUpdate: async (req) => {
-            calls.batchUpdate.push(req);
-            return {};
-          },
-          append: async (req) => {
-            calls.append.push(req);
-            return {};
-          },
-        },
-      },
-    };
-
-    const n = await sink.writeRows([
-      {
-        ok: true,
-        slot: 3,
-        intervals: ['2m', '3m', '5m'],
-        interval: '2m',
-        contract: 'CRUDEOIL-I',
-        candle_time: '2026-09-04T09:15:00+05:30',
-        open: 13650,
-        high: 13700,
-        low: 13010,
-        close: 13420,
-        delta: 1,
-        max_delta: 2,
-        max_vol_b: 4200,
-        max_vol_s: 3100,
-        max_vol_b_level: 13650,
-        max_vol_s_level: 13010,
-        poc: 13650,
-        volume: 5337020,
-        oi_change: -28730,
-        vwap: 13340,
-      },
-    ]);
-    assert.equal(n, 1);
-    assert.equal(calls.append.length, 0);
-    assert.equal(calls.batchUpdate.length, 1);
-    const written = calls.batchUpdate[0].requestBody.data[0].values[0];
-    assert.equal(written[8], 4200);
-    assert.equal(written[9], 3100);
-    assert.equal(written[14], 136.5);
-    assert.equal(written[15], 130.1);
-    assert.equal(sink.incompleteKeys.has(`${tab}\t2026-09-04T09:15:00`), false);
   });
 
   it('dropInstrument forgets old keys for that slot and leaves other slots', () => {
