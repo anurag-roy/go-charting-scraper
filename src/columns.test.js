@@ -45,7 +45,7 @@ describe('sheet helpers', () => {
     assert.equal(formatSheetCandleTime('2026-08-17T09:15:00+05:30'), '2026-08-17T09:15:00');
   });
 
-  it('writes a leading contract symbol, scaled OHLC/VWAP, and clamped max_delta', () => {
+  it('writes a leading contract symbol, scaled OHLC/VWAP/POC, and clamped max_delta', () => {
     const values = rowToSheetValues({
       contract: 'NIFTY26AUG24050CE',
       symbol: 'NSE:OPTIONS:NIFTY26AUG24050CE',
