@@ -58,7 +58,7 @@ the market-data WebSocket, and for each configured instrument persists every
 | `delta` | Buy volume − sell volume |
 | `max_delta` | Intra-bar cumulative-delta high (`0` when missing or negative) |
 | `max_vol_b` / `max_vol_s` | Largest buy / sell volume at any single price |
-| `poc` | Point of control (price with most buy+sell volume) |
+| `poc` | Point of control (price with most buy+sell volume), ticks ÷ 100 |
 | `volume` | Footprint candle volume |
 | `oi_change` | This bar’s open interest minus the previous bar’s |
 | `vwap` | Session VWAP from typical price `(H+L+C)/3` × OHLC volume, ticks ÷ 100, 2 decimal places |

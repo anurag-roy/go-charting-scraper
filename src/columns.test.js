@@ -69,7 +69,7 @@ describe('sheet helpers', () => {
       'NIFTY26AUG24050CE',
       '2026-08-17T09:15:00',
       172.5, 173, 171, 172.5,
-      40, 0, 50, 30, 24300, 150, 12, 172.5, 172.5, 171,
+      40, 0, 50, 30, 243, 150, 12, 172.5, 172.5, 171,
     ]);
     assert.equal(sheetDisplaySymbol('NSE:OPTIONS:NIFTY26AUG24050CE'), 'NIFTY26AUG24050CE');
     assert.equal(sheetMaxDelta(''), 0);
@@ -107,7 +107,7 @@ describe('sheet helpers', () => {
         SHEET_COLUMNS,
         { symbol: 'NIFTY-I' },
       ),
-      ['NIFTY-I', '2026-08-17T09:15:00', 172.5, 173, 171, 172.5, 1, 2, 3, 4, 5, 6, 7, 80.1, '', ''],
+      ['NIFTY-I', '2026-08-17T09:15:00', 172.5, 173, 171, 172.5, 1, 2, 3, 4, 0.05, 6, 7, 80.1, '', ''],
     );
     assert.equal(sheetCandleDate('2026-08-17T09:15:00+05:30'), '2026-08-17');
   });
@@ -324,6 +324,7 @@ describe('SheetsSink', () => {
     assert.equal(calls.append.length, 0);
     assert.equal(calls.batchUpdate.length, 1);
     assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][7], 0);
+    assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][10], 2412.5);
     assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][14], 2412.5);
     assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][15], 2412.1);
     assert.equal(sink.incompleteKeys.has(`${tab}\t2026-08-19T10:25:00`), false);
@@ -429,7 +430,7 @@ describe('SheetsSink', () => {
     assert.equal(calls.clear.length, 1);
     assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
     assert.deepEqual(calls.update[1].requestBody.values[0], [
-      'NIFTY-I', '2026-08-18T09:15:00', 1, 1.1, 0.99, 1.05, 8, 9, 10, 11, 12, 13, 14, 0.2, '', '',
+      'NIFTY-I', '2026-08-18T09:15:00', 1, 1.1, 0.99, 1.05, 8, 9, 10, 11, 0.12, 13, 14, 0.2, '', '',
     ]);
     assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
     assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), true);
@@ -660,6 +661,7 @@ describe('closedRowsForInterval', () => {
     const sheet = rowToSheetValues(rows[0]);
     assert.equal(sheet[8], 4200);
     assert.equal(sheet[9], 3100);
+    assert.equal(sheet[10], 136.5);
     assert.equal(sheet[14], 136.5);
     assert.equal(sheet[15], 130.1);
   });

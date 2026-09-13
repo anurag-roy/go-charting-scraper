@@ -19,7 +19,7 @@ export const SHEET_COLUMNS = [
   'max_vol_s_level',
 ];
 
-/** GoCharting stores prices as integer ticks; sheet OHLC/VWAP/max-vol prices are ticks / 100. */
+/** GoCharting stores prices as integer ticks; sheet OHLC/VWAP/POC/max-vol prices are ticks / 100. */
 export const SHEET_PRICE_SCALE = 100;
 const SHEET_PRICE_COLUMNS = new Set([
   'open',
@@ -27,6 +27,7 @@ const SHEET_PRICE_COLUMNS = new Set([
   'low',
   'close',
   'vwap',
+  'poc',
   'max_vol_b_level',
   'max_vol_s_level',
 ]);
