@@ -45,7 +45,7 @@ describe('sheet helpers', () => {
     assert.equal(formatSheetCandleTime('2026-08-17T09:15:00+05:30'), '2026-08-17T09:15:00');
   });
 
-  it('writes a leading contract symbol, scaled OHLC/VWAP, and clamped max_delta', () => {
+  it('writes a leading contract symbol, scaled OHLC/VWAP/POC, and clamped max_delta', () => {
     const values = rowToSheetValues({
       contract: 'NIFTY26AUG24050CE',
       symbol: 'NSE:OPTIONS:NIFTY26AUG24050CE',
@@ -69,7 +69,7 @@ describe('sheet helpers', () => {
       'NIFTY26AUG24050CE',
       '2026-08-17T09:15:00',
       172.5, 173, 171, 172.5,
-      40, 0, 50, 30, 24300, 150, 12, 172.5, 172.5, 171,
+      40, 0, 50, 30, 243, 150, 12, 172.5, 172.5, 171,
     ]);
     assert.equal(sheetDisplaySymbol('NSE:OPTIONS:NIFTY26AUG24050CE'), 'NIFTY26AUG24050CE');
     assert.equal(sheetMaxDelta(''), 0);
@@ -107,7 +107,7 @@ describe('sheet helpers', () => {
         SHEET_COLUMNS,
         { symbol: 'NIFTY-I' },
       ),
-      ['NIFTY-I', '2026-08-17T09:15:00', 172.5, 173, 171, 172.5, 1, 2, 3, 4, 5, 6, 7, 80.1, '', ''],
+      ['NIFTY-I', '2026-08-17T09:15:00', 172.5, 173, 171, 172.5, 1, 2, 3, 4, 0.05, 6, 7, 80.1, '', ''],
     );
     assert.equal(sheetCandleDate('2026-08-17T09:15:00+05:30'), '2026-08-17');
   });
@@ -324,6 +324,7 @@ describe('SheetsSink', () => {
     assert.equal(calls.append.length, 0);
     assert.equal(calls.batchUpdate.length, 1);
     assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][7], 0);
+    assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][10], 2412.5);
     assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][14], 2412.5);
     assert.equal(calls.batchUpdate[0].requestBody.data[0].values[0][15], 2412.1);
     assert.equal(sink.incompleteKeys.has(`${tab}\t2026-08-19T10:25:00`), false);
@@ -429,7 +430,7 @@ describe('SheetsSink', () => {
     assert.equal(calls.clear.length, 1);
     assert.deepEqual(calls.update[0].requestBody.values[0], SHEET_COLUMNS);
     assert.deepEqual(calls.update[1].requestBody.values[0], [
-      'NIFTY-I', '2026-08-18T09:15:00', 1, 1.1, 0.99, 1.05, 8, 9, 10, 11, 12, 13, 14, 0.2, '', '',
+      'NIFTY-I', '2026-08-18T09:15:00', 1, 1.1, 0.99, 1.05, 8, 9, 10, 11, 0.12, 13, 14, 0.2, '', '',
     ]);
     assert.equal(sink.keys.has(`${tab}\t2026-08-17T09:15:00`), false);
     assert.equal(sink.keys.has(`${tab}\t2026-08-18T09:15:00`), true);
@@ -627,6 +628,42 @@ describe('closedRowsForInterval', () => {
     ]);
     assert.equal(sheet[sheet.length - 2], 0.01);
     assert.equal(sheet[sheet.length - 1], 0.01);
+  });
+
+  it('writes footprint lots into max_vol_b/s when server max is the price', () => {
+    const nowMs = Date.parse('2026-09-04T09:22:02+05:30');
+    const rows = closedRowsForInterval({
+      instrument,
+      interval: '5m',
+      candles: [{
+        date: '2026-09-04T09:15:00+05:30',
+        totals: { buy: { volume: 8000 }, sell: { volume: 5000 } },
+        max: { buy: { volume: 13650 }, sell: { volume: 13010 } },
+        footprint: [
+          { level: 13650, buy: { volume: 4200 }, sell: { volume: 800 } },
+          { level: 13010, buy: { volume: 900 }, sell: { volume: 3100 } },
+        ],
+      }],
+      ohlcBars: [
+        { time: '2026-09-04T09:15:00+05:30', open: 13650, high: 13700, low: 13010, close: 13420, volume: 100, oi: 100 },
+      ],
+      nowMs,
+      sessionOpts,
+      sampled_at_utc: 'u',
+      sampled_at_ist: 'i',
+      sample_n: 1,
+    });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].max_vol_b, 4200);
+    assert.equal(rows[0].max_vol_s, 3100);
+    assert.equal(rows[0].max_vol_b_level, 13650);
+    assert.equal(rows[0].max_vol_s_level, 13010);
+    const sheet = rowToSheetValues(rows[0]);
+    assert.equal(sheet[8], 4200);
+    assert.equal(sheet[9], 3100);
+    assert.equal(sheet[10], 136.5);
+    assert.equal(sheet[14], 136.5);
+    assert.equal(sheet[15], 130.1);
   });
 });
 
