@@ -58,6 +58,30 @@ export function flattenOhlc(obj) {
   return out;
 }
 
+export function stripHtml(s) {
+  return String(s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** True when the server rejected orderflow for a plan / entitlement reason. */
+export function isFatalFootprintError(error) {
+  return /premium|purchase|subscribe|not available|unauthorized|forbidden|upgrade/i
+    .test(String(error || ''));
+}
+
+export function notificationMessage(obj) {
+  if (!obj || obj.command !== 'NOTIFICATION') return '';
+  return stripHtml(obj.out?.message || obj.message || obj.out?.error || '');
+}
+
+export function notificationSymbolKey(obj) {
+  const src = obj?.in || obj?.payload || {};
+  const exchange = String(src.exchange || '').trim();
+  const segment = String(src.segment || '').trim();
+  const symbol = String(src.symbol || '').trim();
+  if (!exchange || !segment || !symbol) return '';
+  return `${exchange}:${segment}:${symbol}`;
+}
+
 export function parseFrame(buf) {
   if (!buf || buf.length < 6) return null;
   let data = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
@@ -282,6 +306,24 @@ export class FootprintClient {
     if (ref && this.pending.has(requestId)) {
       this.send({ command: 'FOOTPRINT/V2', request_id: Number(requestId), payload: { ref } });
     }
+    const note = notificationMessage(obj);
+    if (note) {
+      const key = notificationSymbolKey(obj);
+      const interval = String(obj.in?.interval || obj.payload?.interval || '');
+      const matched = [];
+      for (const [id, p] of this.pending) {
+        if (p.kind !== 'footprint') continue;
+        if (key && p.symbolKey !== key) continue;
+        if (interval && p.interval !== interval) continue;
+        p.extra.error = note;
+        matched.push(id);
+      }
+      if (matched.length) {
+        this.log?.warn(`footprint notification ${key || ''} ${interval}: ${note}`);
+        for (const id of matched) this.finish(id);
+      }
+      return;
+    }
     const p = this.pending.get(requestId);
     if (p && (obj.error || obj.status === 'error' || obj.message)) {
       p.extra.error = obj.error || obj.message || JSON.stringify(obj).slice(0, 300);
@@ -406,6 +448,7 @@ export class FootprintClient {
       const res = await this.requestOne(instrument, interval, [date], timeoutMs);
       if (res.ok && res.candles.length) return res;
       last = res;
+      if (isFatalFootprintError(res.error)) return res;
     }
     return last;
   }
