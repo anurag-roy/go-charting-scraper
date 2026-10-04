@@ -11,7 +11,7 @@
     "pack": "node scripts/pack.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3.0"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

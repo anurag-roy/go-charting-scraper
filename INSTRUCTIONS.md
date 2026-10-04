@@ -10,6 +10,8 @@ not a VPS): [`WINDOWS.md`](WINDOWS.md).
 
 Related reading:
 
+- [`SETUP.md`](SETUP.md) — current Ubuntu VPS setup alongside TradingView
+
 - [`README.md`](README.md) — one-page product summary
 - [`WINDOWS.md`](WINDOWS.md) — Windows laptop handover (daily start, sleep, gaps)
 - [`.env.example`](.env.example) — Google credentials and optional knobs
@@ -74,8 +76,8 @@ checks about every **15 seconds**, but only requests a timeframe when its curren
 candle can have closed. Overnight and on weekends the WebSocket is closed; the
 process stays up and keeps polling the `config` tab.
 
-Verified on Linux: Node 22, outbound HTTPS + WSS only (no Chromium, no Xvfb,
-no display).
+The live path uses outbound HTTPS + WSS; it needs no Chromium, Xvfb, or display.
+Use Node 24 on the VPS, following [`SETUP.md`](SETUP.md).
 
 ---
 
@@ -127,7 +129,7 @@ failure the previous working session is kept.
 
 | Item | Recommendation |
 | --- | --- |
-| OS | Ubuntu 22.04 / 24.04 (Debian 12 is fine). macOS / any Node 20+ host. |
+| OS | Ubuntu 22.04 / 24.04 (Debian 12 is fine). macOS / any Node 20.3+ host. |
 | CPU / RAM | Tiny: **~128–256 MB**. No Chrome. |
 | Disk | ~50 MB for Node deps; plus log growth. |
 | Display | **Not required.** |
@@ -144,7 +146,7 @@ failure the previous working session is kept.
 ### Software
 
 - `git`
-- **Node.js 20 or 22** (22 is what this was developed on)
+- **Node.js 24** for the VPS (reuse the TradingView installation)
 - `npm` (comes with Node)
 
 Optional: Docker ([§14](#14-docker)). Playwright is **not** used by the live
@@ -199,14 +201,14 @@ One-time:
 1. Create a Google Cloud project (or reuse one).
 2. Enable the **Google Sheets API**.
 3. Create a **service account** and download its JSON key. Keep it **out of
-   git** (for example `/etc/gocharting/google-service-account.json`).
+   git** (for example `/opt/go-charting-scraper/.auth/google-service-account.json`).
 4. Share the spreadsheet with the service account’s `client_email` as
    **Editor**.
 
 You can authenticate the scraper either with that JSON file
 (`GOOGLE_SERVICE_ACCOUNT_JSON`) or with `GOOGLE_CLIENT_EMAIL` +
-`GOOGLE_PRIVATE_KEY`. On systemd, the **JSON file is easier** because PEM
-newlines are awkward in `EnvironmentFile=`.
+`GOOGLE_PRIVATE_KEY`. The VPS guide uses a private JSON file so the key and
+its ownership can be checked independently of `.env`.
 
 ---
 
@@ -215,18 +217,13 @@ newlines are awkward in `EnvironmentFile=`.
 ```bash
 git clone https://github.com/anurag-roy/go-charting-scraper.git
 cd go-charting-scraper
-node -v    # want v20.x or v22.x
+node -v    # use v24.x on the VPS
 npm ci     # from the repo root — that is where package.json lives
 ```
 
-If Node is missing, on Ubuntu/Debian (Node 22):
-
-```bash
-sudo apt-get update
-sudo apt-get install -y ca-certificates curl gnupg git
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-```
+For Ubuntu installation and the Node 24 executable path, follow
+[`SETUP.md`](SETUP.md). Reuse your existing Node installation when deploying
+alongside TradingView.
 
 Layout you will use:
 
@@ -267,21 +264,13 @@ cp .env.example .env
 
 The process auto-loads `.env` from the repo root via `dotenv`.
 
-### Durable env on the server
+### Durable configuration on the server
 
-```bash
-sudo mkdir -p /etc/gocharting
-sudo cp /path/to/google-service-account.json /etc/gocharting/google-service-account.json
-sudo chmod 600 /etc/gocharting/google-service-account.json
-
-sudo tee /etc/gocharting/env >/dev/null <<'EOF'
-GOOGLE_SHEET_ID=your-spreadsheet-id
-GOOGLE_SERVICE_ACCOUNT_JSON=/etc/gocharting/google-service-account.json
-EOF
-sudo chmod 600 /etc/gocharting/env
-```
-
-Do **not** commit `.env`, `/etc/gocharting/env`, or the JSON key.
+Use `/opt/go-charting-scraper/.env` and a private key owned by `ubuntu` at
+`/opt/go-charting-scraper/.auth/google-service-account.json`, following
+[`SETUP.md`](SETUP.md). The supplied service loads `.env` through dotenv and
+runs as `ubuntu`; that account must be able to read the key and write `logs/`.
+Do not commit either credentials file.
 
 ---
 
@@ -358,6 +347,8 @@ spreadsheet id are required.
 | `SAMPLE_MS` | `15000` | Maximum start-to-start polling cadence while in session; candle-close deadlines can wake it sooner |
 | `CLOSE_GRACE_MS` | `2000` | Wait after a bar’s end before treating it as closed |
 | `AFTER_CLOSE_BUFFER_MS` | `60000` | Extra sampling after the session close to catch last bars |
+| `HTTP_TIMEOUT_MS` | `20000` | Deadline for Cognito, Google token, and Sheets requests |
+| `WS_HEARTBEAT_MS` | `30000` | Ping cadence; missed pong for two ticks forces reconnect |
 | `TOKEN_REFRESH_MS` | `2700000` (45 min) | Refresh Cognito JWT / reconnect WebSocket |
 | `GOCHARTING_SESSION` | `RTH` | Session type sent on WS payloads |
 | `WS_DC` | `blr1` | Market-data datacenter (`blr1` or `nyc1`) |
@@ -377,8 +368,7 @@ spreadsheet id are required.
 
 Tabs are named from the **config slot** and the **timeframe letter**, not from
 the symbol. `Instrument1` always writes `1A`, `1B`, `1C`; `Instrument2` writes
-`2A`, `2B`, `2C`; and so on. Column C is letter A, D is B, E is C. Extra
-timeframes in F onward become `1D`, `1E`, …
+`2A`, `2B`, `2C`; and so on. Column C is letter A, D is B, E is C. Cells in F onward are ignored.
 
 | Config row | Example timeframes | Tabs |
 | --- | --- | --- |
@@ -461,68 +451,19 @@ password is logged and the previous Cognito session is kept.
 
 ## 13. Linux server (systemd)
 
-Recommended: one long-running process with `Restart=always`.
+Follow [`SETUP.md`](SETUP.md) for the complete Ubuntu VPS procedure. It uses
+`/opt/go-charting-scraper`, the existing `ubuntu` user, and
+`/usr/local/bin/node` from the TradingView Node 24 installation.
 
-### 13.1 User, clone, dependencies
+The service starts at boot, restarts after failures, loads `.env`, and fixes
+`ONCE=0` and `LAST_WORKING_DAY=0` for production. SIGTERM cancels HTTP requests,
+retry waits, and pending socket requests. A spreadsheet-specific loopback guard
+blocks a second writer in the same host network namespace and is released by the
+OS after a crash. Stop the laptop process before switching to the VPS.
 
-```bash
-sudo useradd --system --home /var/lib/gocharting --shell /usr/sbin/nologin gocharting || true
-sudo mkdir -p /opt/go-charting-scraper
-sudo git clone https://github.com/anurag-roy/go-charting-scraper.git /opt/go-charting-scraper
-cd /opt/go-charting-scraper
-sudo npm ci
-sudo chown -R gocharting:gocharting /opt/go-charting-scraper
-```
-
-Create `/etc/gocharting/env` as in [§7](#7-configure-the-vps--laptop-env).
-
-### 13.2 Install the unit
-
-The repo ships [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service):
-
-```ini
-[Unit]
-Description=GoCharting Google Sheets scraper (24x7)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=gocharting
-Group=gocharting
-WorkingDirectory=/opt/go-charting-scraper
-EnvironmentFile=/etc/gocharting/env
-ExecStart=/usr/bin/node src/index.js
-Restart=always
-RestartSec=10
-Nice=10
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo cp /opt/go-charting-scraper/deploy/gocharting-scraper.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now gocharting-scraper.service
-sudo journalctl -u gocharting-scraper.service -f
-```
-
-Smoke-test as the service user before enabling, if you want:
-
-```bash
-sudo -u gocharting bash -lc 'set -a; source /etc/gocharting/env; set +a; cd /opt/go-charting-scraper && ONCE=1 /usr/bin/node src/index.js'
-```
-
-### 13.3 Updates
-
-```bash
-cd /opt/go-charting-scraper
-sudo -u gocharting git pull --ff-only
-sudo npm ci
-sudo systemctl restart gocharting-scraper.service
-```
+If upgrading the old `gocharting`-user service, the setup guide explains the
+ownership and configuration migration. Do not copy the old `/usr/bin/node`
+service onto a server where Node lives at `/usr/local/bin/node`.
 
 ---
 
@@ -567,8 +508,7 @@ Written under `logs/` in the working directory (gitignored except
 | `logs/status.json` | Last config summary (no password), last sample time, websocket `open`/`closed`. |
 | stdout / `journalctl` | Routine `INFO` / `WARN` lines. |
 
-The `gocharting` user must be able to write `logs/` (the `chown` in §13.1
-covers that).
+The `ubuntu` service user must be able to write `logs/`; see [`SETUP.md`](SETUP.md).
 
 ---
 
@@ -594,7 +534,7 @@ covers that).
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
-| `set GOOGLE_SHEET_ID …` (exit 2) | Env not loaded | Copy `.env.example`. systemd: `EnvironmentFile=` exists and `chmod 600`. |
+| `set GOOGLE_SHEET_ID …` (exit 2) | Env not loaded | Copy `.env.example`; the service reads `/opt/go-charting-scraper/.env`. Check owner and mode `600`. |
 | `Google credentials are missing` / file not found | JSON path or PEM wrong | Set `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY`. Share the sheet with the service account as Editor. |
 | `config sheet is missing email, password, or instruments with candle timeframes` | Tab name / cells | Tab must be `config`. Labels in A, symbol in B, timeframes in C–E. |
 | `unsupported exchange` / `invalid instrument` | Bad `InstrumentN` | Use `NSE\|BSE\|MCX:CATEGORY:SYMBOL`. Check `logs/error.log`. |

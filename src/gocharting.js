@@ -115,7 +115,7 @@ export class OhlcCollector {
       const interval = obj.payload?.interval;
       const requestId = obj.request_id ?? obj.requestId;
       const symbol = obj.payload?.symbol;
-      if (obj.command === 'TS/V2' && interval != null && requestId != null) {
+      if (obj.command === 'TS/V2' && obj.action === 'add' && interval != null && requestId != null) {
         this.reqInterval.set(String(requestId), { interval, symbol });
       }
     } catch { /* ignore */ }
@@ -152,7 +152,7 @@ export class OhlcCollector {
 }
 
 export class FootprintClient {
-  constructor({ FP, OHLC, session = 'RTH', intervals = [], log, dbg } = {}) {
+  constructor({ FP, OHLC, session = 'RTH', intervals = [], log, dbg, signal, heartbeatMs = 30_000 } = {}) {
     this.wsUrl = '';
     this.FP = FP;
     this.OHLC = OHLC;
@@ -166,6 +166,13 @@ export class FootprintClient {
     this.pending = new Map();
     this.nativeIntervals = new Set();
     this.ohlcIdxInUse = new Set();
+    this.signal = signal;
+    this.heartbeatMs = heartbeatMs;
+    this.heartbeat = null;
+    this.requestTimeouts = 0;
+    this.stopped = Boolean(signal?.aborted);
+    this.onAbort = () => this.stop();
+    signal?.addEventListener('abort', this.onAbort, { once: true });
   }
 
   get readyState() {
@@ -185,26 +192,38 @@ export class FootprintClient {
       clearTimeout(p.timer);
       if (p.quiet) clearTimeout(p.quiet);
       if (p.kind === 'ohlc') this.#releaseOhlcIdx(p.idx);
-      p.resolve({ ok: false, error });
+      this.ohlcCollector.reqInterval.delete(p.id);
+      p.resolve({ ok: false, error, candles: [], bars: [] });
     }
     this.pending.clear();
   }
 
   async disconnect() {
+    clearInterval(this.heartbeat);
+    this.heartbeat = null;
     this.failPending('ws disconnect');
+    this.ohlcCollector.clear();
+    this.nativeIntervals.clear();
     const ws = this.ws;
     this.ws = null;
     if (!ws) return;
-    try { ws.removeAllListeners(); } catch { /* ignore */ }
-    try { ws.close(); } catch { /* ignore */ }
+    // Keep the error/close handlers until destruction finishes.
+    try { ws.terminate(); } catch { /* ignore */ }
   }
 
-  connect(wsUrl) {
+  stop() {
+    this.stopped = true;
+    this.signal?.removeEventListener('abort', this.onAbort);
+    void this.disconnect();
+  }
+
+  async connect(wsUrl) {
+    this.signal?.throwIfAborted();
+    if (this.stopped) return Promise.reject(new Error('scraper stopped'));
     if (wsUrl) this.wsUrl = wsUrl;
     return new Promise((resolve, reject) => {
-      try { this.ws?.removeAllListeners(); } catch { /* ignore */ }
-      try { this.ws?.close(); } catch { /* ignore */ }
-      this.failPending('ws reconnect');
+      void this.disconnect();
+      this.requestTimeouts = 0;
       const ws = new WebSocket(this.wsUrl, {
         origin: 'https://gocharting.com',
         perMessageDeflate: false,
@@ -218,7 +237,7 @@ export class FootprintClient {
       let opened = false;
       const t = setTimeout(() => {
         if (!opened) {
-          try { ws.close(); } catch { /* ignore */ }
+          ws.terminate();
           reject(new Error('poc ws connect timeout'));
         }
       }, 20_000);
@@ -226,12 +245,27 @@ export class FootprintClient {
         opened = true;
         clearTimeout(t);
         this.dbg({ ev: 'poc-ws-open' });
+        let awaitingPong = false;
+        ws.on('pong', () => { awaitingPong = false; });
+        this.heartbeat = setInterval(() => {
+          if (this.ws !== ws) return;
+          if (awaitingPong) {
+            this.log?.warn('websocket heartbeat timed out; reconnecting');
+            ws.terminate();
+            return;
+          }
+          awaitingPong = true;
+          ws.ping();
+        }, this.heartbeatMs);
         resolve();
       });
       ws.on('unexpected-response', (req, res) => {
         this.dbg({ ev: 'poc-ws-unexpected', status: res.statusCode });
         if (!opened) {
           clearTimeout(t);
+          res.resume();
+          req.destroy();
+          ws.terminate();
           reject(new Error(`ws unexpected HTTP ${res.statusCode}`));
         }
       });
@@ -239,16 +273,23 @@ export class FootprintClient {
         this.dbg({ ev: 'poc-ws-error', err: String(err.message || err) });
         if (!opened) {
           clearTimeout(t);
+          ws.terminate();
           reject(err);
         }
       });
       ws.on('close', (code, reason) => {
+        clearTimeout(t);
+        if (!opened) reject(new Error(`ws closed before connecting ${code}`));
         this.dbg({ ev: 'poc-ws-close', code, reason: String(reason || '') });
         if (this.ws !== ws) return;
+        clearInterval(this.heartbeat);
+        this.heartbeat = null;
         this.ws = null;
         this.failPending(`ws closed ${code}`);
       });
-      ws.on('message', (data, isBinary) => this.onMessage(data, isBinary));
+      ws.on('message', (data, isBinary) => {
+        if (this.ws === ws) this.onMessage(data, isBinary);
+      });
     });
   }
 
@@ -285,6 +326,8 @@ export class FootprintClient {
     const p = this.pending.get(requestId);
     if (p && (obj.error || obj.status === 'error' || obj.message)) {
       p.extra.error = obj.error || obj.message || JSON.stringify(obj).slice(0, 300);
+      p.received = true;
+      this.finish(requestId);
     }
   }
 
@@ -312,6 +355,7 @@ export class FootprintClient {
     const candles = obj.candles || [];
     const p = this.pending.get(fr.requestId);
     if (!p) return;
+    p.received = true;
     p.candles.push(...candles);
     if (req.interval) p.interval = req.interval;
     if (fr.cursor && candles.length === 0) {
@@ -336,43 +380,58 @@ export class FootprintClient {
     const symbolKey = p?.symbolKey || meta?.symbol;
     if (interval && symbolKey) this.ohlcCollector.merge(symbolKey, interval, bars);
     if (!p || p.kind !== 'ohlc') return;
+    p.received = true;
     p.bars.push(...bars);
     if (p.quiet) clearTimeout(p.quiet);
     p.quiet = setTimeout(() => this.finish(p.id), 1200);
   }
 
-  finish(requestId) {
+  finish(requestId, { deadline = false } = {}) {
     const p = this.pending.get(requestId);
     if (!p) return;
     clearTimeout(p.timer);
     if (p.quiet) clearTimeout(p.quiet);
     this.pending.delete(requestId);
+    this.ohlcCollector.reqInterval.delete(p.id);
+    const timedOut = deadline && !p.received;
+    if (timedOut) {
+      p.extra.error = 'request timed out without a data response';
+      this.requestTimeouts += 1;
+    } else if (p.received && !p.extra.error) {
+      this.requestTimeouts = 0;
+    }
     if (p.kind === 'ohlc') {
       this.#releaseOhlcIdx(p.idx);
       this.#removeOhlc(p);
       p.resolve({
-        ok: p.bars.length > 0,
+        ok: p.bars.length > 0 && !p.extra.error,
         interval: p.interval,
         bars: dedupeOhlcBars(p.bars),
         error: p.extra.error || (p.bars.length ? '' : 'no ohlc bars'),
+        timedOut,
       });
-      return;
-    }
-    p.resolve({
-      ok: p.candles.length > 0,
+    } else p.resolve({
+      ok: p.candles.length > 0 && !p.extra.error,
       interval: p.interval,
       candles: p.candles,
       error: p.extra.error || (p.candles.length ? '' : 'no candles'),
+      timedOut,
     });
+    if (this.requestTimeouts >= 3) {
+      this.log?.warn('repeated data request timeouts; reconnecting websocket');
+      void this.disconnect();
+    }
   }
 
   requestOne(instrument, interval, dates, timeoutMs) {
+    this.signal?.throwIfAborted();
+    if (!this.isOpen()) return Promise.resolve({ ok: false, candles: [], error: 'ws not open' });
     const request_id = this.nextId++;
     const symbolKey = symbolId(instrument);
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (!this.pending.has(String(request_id))) return;
-        this.finish(String(request_id));
+        this.finish(String(request_id), { deadline: true });
       }, timeoutMs);
       this.pending.set(String(request_id), {
         id: String(request_id),
@@ -404,6 +463,7 @@ export class FootprintClient {
     let last = { ok: false, interval, candles: [], error: 'no candles for any date' };
     for (const date of dates) {
       const res = await this.requestOne(instrument, interval, [date], timeoutMs);
+      if (res.timedOut || !this.isOpen() || this.stopped) return res;
       if (res.ok && res.candles.length) return res;
       last = res;
     }
@@ -442,19 +502,22 @@ export class FootprintClient {
   async requestOhlc(instrument, interval, timeoutMs = 12_000) {
     let res = await this.#requestOhlcOnce(instrument, interval, timeoutMs);
     if (res.ok && res.bars.length) return res;
+    if (res.timedOut || !this.isOpen() || this.stopped) return res;
     this.log?.warn(`ohlc empty ${symbolId(instrument)} ${interval}; retrying`);
-    await sleep(400);
+    await sleep(400, { signal: this.signal });
     return this.#requestOhlcOnce(instrument, interval, timeoutMs);
   }
 
   #requestOhlcOnce(instrument, interval, timeoutMs = 12_000) {
+    this.signal?.throwIfAborted();
+    if (!this.isOpen()) return Promise.resolve({ ok: false, bars: [], error: 'ws not open' });
     const request_id = this.nextId++;
     const symbolKey = symbolId(instrument);
     const idx = this.#allocOhlcIdx();
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (!this.pending.has(String(request_id))) return;
-        this.finish(String(request_id));
+        this.finish(String(request_id), { deadline: true });
       }, timeoutMs);
       this.pending.set(String(request_id), {
         id: String(request_id),

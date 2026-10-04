@@ -31,12 +31,13 @@ export function sheetA1(tab, range) {
   return `${quoted}!${range}`;
 }
 
-export function makeGoogleAuth({ googleCredentialsPath, googleCredentialsJson, googleClientEmail, googlePrivateKey }) {
+export function makeGoogleAuth({ googleCredentialsPath, googleCredentialsJson, googleClientEmail, googlePrivateKey, httpTimeoutMs = 20_000, signal }) {
+  const clientOptions = { transporterOptions: { timeout: httpTimeoutMs, signal, retry: false } };
   if (googleCredentialsPath) {
-    return new google.auth.GoogleAuth({ keyFile: googleCredentialsPath, scopes: SCOPES });
+    return new google.auth.GoogleAuth({ keyFile: googleCredentialsPath, scopes: SCOPES, clientOptions });
   }
   if (googleCredentialsJson) {
-    return new google.auth.GoogleAuth({ credentials: googleCredentialsJson, scopes: SCOPES });
+    return new google.auth.GoogleAuth({ credentials: googleCredentialsJson, scopes: SCOPES, clientOptions });
   }
   return new google.auth.GoogleAuth({
     credentials: {
@@ -44,18 +45,33 @@ export function makeGoogleAuth({ googleCredentialsPath, googleCredentialsJson, g
       private_key: googlePrivateKey,
     },
     scopes: SCOPES,
+    clientOptions,
   });
 }
 
-export function createSheetsApi(cfg) {
-  const auth = makeGoogleAuth(cfg);
-  return google.sheets({ version: 'v4', auth });
+export async function createSheetsApi(cfg) {
+  cfg.signal?.throwIfAborted();
+  const auth = await makeGoogleAuth(cfg).getClient();
+  // Apply these to token acquisition too. gToken otherwise enables its own retries.
+  auth.transporter.interceptors.request.add({
+    resolved(options) {
+      cfg.signal?.throwIfAborted();
+      options.retry = false;
+      options.retryConfig = { ...options.retryConfig, retry: 0, noResponseRetries: 0 };
+      return options;
+    },
+  });
+  return google.sheets({
+    version: 'v4', auth, timeout: cfg.httpTimeoutMs ?? 20_000,
+    signal: cfg.signal, retry: false,
+  });
 }
 
-function retryOpts(log, label) {
+function retryOpts(log, label, signal) {
   return {
     label,
     retries: 5,
+    signal,
     onRetry: ({ err, wait, attempt }) => {
       log?.warn(`${label} retry ${attempt} in ${wait}ms: ${err?.message || err}`);
     },
@@ -70,11 +86,12 @@ async function settledSum(promises) {
 }
 
 export class ConfigSheet {
-  constructor({ sheetsApi, spreadsheetId, tab = 'config', log } = {}) {
+  constructor({ sheetsApi, spreadsheetId, tab = 'config', log, signal } = {}) {
     this.sheetsApi = sheetsApi;
     this.spreadsheetId = spreadsheetId;
     this.tab = tab;
     this.log = log;
+    this.signal = signal;
   }
 
   async read() {
@@ -83,7 +100,7 @@ export class ConfigSheet {
         spreadsheetId: this.spreadsheetId,
         range: sheetA1(this.tab, 'A1:E8'),
       }),
-      retryOpts(this.log, 'config read'),
+      retryOpts(this.log, 'config read', this.signal),
     );
     return parseConfigRows(res.data.values || []);
   }
@@ -94,17 +111,18 @@ export class ConfigSheet {
         spreadsheetId: this.spreadsheetId,
         fields: 'sheets.properties.title',
       }),
-      retryOpts(this.log, 'spreadsheet meta'),
+      retryOpts(this.log, 'spreadsheet meta', this.signal),
     );
     return (meta.data.sheets || []).map((s) => s.properties?.title).filter(Boolean);
   }
 }
 
 export class SheetsSink {
-  constructor({ sheetsApi, spreadsheetId, log } = {}) {
+  constructor({ sheetsApi, spreadsheetId, log, signal } = {}) {
     this.sheetsApi = sheetsApi;
     this.spreadsheetId = spreadsheetId;
     this.log = log;
+    this.signal = signal;
     this.keys = new Set();
     this.incompleteKeys = new Set();
     this.loadedTabs = new Set();
@@ -138,7 +156,7 @@ export class SheetsSink {
         spreadsheetId: this.spreadsheetId,
         ranges: tabs.map((tab) => sheetA1(tab, 'A1:Z1')),
       }),
-      retryOpts(this.log, 'static headers'),
+      retryOpts(this.log, 'static headers', this.signal),
     );
     const valueRanges = res.data.valueRanges || [];
     const missingHeaders = [];
@@ -152,7 +170,7 @@ export class SheetsSink {
           spreadsheetId: this.spreadsheetId,
           requestBody: { valueInputOption: 'RAW', data: missingHeaders },
         }),
-        retryOpts(this.log, 'static headers write'),
+        retryOpts(this.log, 'static headers write', this.signal),
       );
     }
     this.staticTabsReady = true;
@@ -195,7 +213,7 @@ export class SheetsSink {
         spreadsheetId: this.spreadsheetId,
         fields: 'sheets.properties.title',
       }),
-      retryOpts(this.log, 'spreadsheet meta'),
+      retryOpts(this.log, 'spreadsheet meta', this.signal),
     );
     this.sheetTitles = new Set((meta.data.sheets || []).map((s) => s.properties?.title).filter(Boolean));
     return this.sheetTitles;
@@ -212,7 +230,7 @@ export class SheetsSink {
           requests: missing.map((title) => ({ addSheet: { properties: { title } } })),
         },
       }),
-      retryOpts(this.log, 'add sheets'),
+      retryOpts(this.log, 'add sheets', this.signal),
     );
     for (const title of missing) existing.add(title);
   }
@@ -225,7 +243,7 @@ export class SheetsSink {
         valueInputOption: 'RAW',
         requestBody: { values: [SHEET_COLUMNS] },
       }),
-      retryOpts(this.log, `header ${tab}`),
+      retryOpts(this.log, `header ${tab}`, this.signal),
     );
   }
 
@@ -237,7 +255,7 @@ export class SheetsSink {
         valueInputOption: 'RAW',
         requestBody: { values: [[identity || '']] },
       }),
-      retryOpts(this.log, `identity ${tab}`),
+      retryOpts(this.log, `identity ${tab}`, this.signal),
     );
   }
 
@@ -247,7 +265,7 @@ export class SheetsSink {
         spreadsheetId: this.spreadsheetId,
         range: sheetA1(tab, 'A2:Z'),
       }),
-      retryOpts(this.log, `clear ${tab}`),
+      retryOpts(this.log, `clear ${tab}`, this.signal),
     );
     this.#replaceTabKeys(tab, []);
   }
@@ -295,7 +313,7 @@ export class SheetsSink {
         spreadsheetId: this.spreadsheetId,
         range: sheetA1(tab, 'A2:Z'),
       }),
-      retryOpts(this.log, `clear ${tab}`),
+      retryOpts(this.log, `clear ${tab}`, this.signal),
     );
     if (!mapped.length) return;
     await withRetry(
@@ -305,7 +323,7 @@ export class SheetsSink {
         valueInputOption: 'RAW',
         requestBody: { values: mapped },
       }),
-      retryOpts(this.log, `rewrite ${tab}`),
+      retryOpts(this.log, `rewrite ${tab}`, this.signal),
     );
   }
 
@@ -315,7 +333,7 @@ export class SheetsSink {
         spreadsheetId: this.spreadsheetId,
         range: sheetA1(tab, 'A:Z'),
       }),
-      retryOpts(this.log, `read ${tab}`),
+      retryOpts(this.log, `read ${tab}`, this.signal),
     );
     const values = res.data.values || [];
     const expected = expectedIdentity == null ? null : String(expectedIdentity);
@@ -362,7 +380,7 @@ export class SheetsSink {
         spreadsheetId: this.spreadsheetId,
         range: sheetA1(tab, 'A:Z'),
       }),
-      retryOpts(this.log, `read ${tab}`),
+      retryOpts(this.log, `read ${tab}`, this.signal),
     );
     const values = res.data.values || [];
     if (!values.length) {
@@ -451,7 +469,7 @@ export class SheetsSink {
             insertDataOption: 'OVERWRITE',
             requestBody: { values: stillNew.map(rowToSheetValues) },
           }),
-          retryOpts(this.log, `append ${tab}`),
+          retryOpts(this.log, `append ${tab}`, this.signal),
         );
         for (const row of stillNew) {
           const k = sheetRowKey(tab, row.candle_time);
@@ -485,7 +503,7 @@ export class SheetsSink {
         spreadsheetId: this.spreadsheetId,
         range: sheetA1(tab, 'A:Z'),
       }),
-      retryOpts(this.log, `read ${tab} for ohlc patch`),
+      retryOpts(this.log, `read ${tab} for ohlc patch`, this.signal),
     );
     const values = res.data.values || [];
     const header = values[0] || [];
@@ -516,7 +534,7 @@ export class SheetsSink {
         spreadsheetId: this.spreadsheetId,
         requestBody: { valueInputOption: 'RAW', data },
       }),
-      retryOpts(this.log, `patch ohlc ${tab}`),
+      retryOpts(this.log, `patch ohlc ${tab}`, this.signal),
     );
     this.log?.info(`filled missing cells on ${tab} (${data.length} row(s))`);
     return data.length;

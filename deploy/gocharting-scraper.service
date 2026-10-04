@@ -2,16 +2,26 @@
 Description=GoCharting Google Sheets scraper (24x7)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
-User=gocharting
-Group=gocharting
+User=ubuntu
+Group=ubuntu
 WorkingDirectory=/opt/go-charting-scraper
-EnvironmentFile=/etc/gocharting/env
-ExecStart=/usr/bin/node src/index.js
-Restart=always
-RestartSec=10
+Environment=NODE_ENV=production
+# dotenv reads .env; production always monitors the current IST day continuously.
+Environment=ONCE=0 LAST_WORKING_DAY=0
+ExecStart=/usr/local/bin/node src/index.js
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=40
+KillMode=control-group
+UMask=0077
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 Nice=10
 NoNewPrivileges=true
 

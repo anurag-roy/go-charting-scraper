@@ -126,7 +126,7 @@ always computed in **Asia/Kolkata**. The PC clock itself must be correct
 
 ### Software to install
 
-1. **Node.js 22 LTS** (20 is also fine) from [https://nodejs.org](https://nodejs.org).
+1. **Node.js 22 LTS** (20.3 or newer is also supported) from [https://nodejs.org](https://nodejs.org).
    During setup, leave **“Add to PATH”** checked. Close and reopen any
    terminal after installing.
 2. Confirm it worked. Open **Command Prompt** or **PowerShell** and run:

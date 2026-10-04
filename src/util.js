@@ -1,5 +1,7 @@
-export function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Number(ms) || 0));
+import { setTimeout as delay } from 'node:timers/promises';
+
+export function sleep(ms, { signal } = {}) {
+  return delay(Math.max(0, Number(ms) || 0), undefined, { signal });
 }
 
 export function pad2(n) {
@@ -16,7 +18,8 @@ export function isRetryableGoogleError(err) {
   const code = Number(err?.code || err?.response?.status || 0);
   if (code === 429 || code === 500 || code === 502 || code === 503 || code === 504) return true;
   const msg = String(err?.message || '');
-  return /rate limit|quota|too many requests|backend error|econnreset|etimedout|socket hang up/i.test(msg);
+  return err?.name === 'TimeoutError'
+    || /rate limit|quota|too many requests|backend error|econnreset|timeout|timed out|socket hang up/i.test(msg);
 }
 
 export async function withRetry(fn, {
@@ -25,18 +28,21 @@ export async function withRetry(fn, {
   maxMs = 32_000,
   label = 'request',
   onRetry,
+  signal,
 } = {}) {
   let delay = baseMs;
   let lastErr;
   for (let i = 0; i <= retries; i += 1) {
+    signal?.throwIfAborted();
     try {
       return await fn();
     } catch (err) {
+      signal?.throwIfAborted();
       lastErr = err;
       if (!isRetryableGoogleError(err) || i === retries) throw err;
       const wait = Math.min(maxMs, delay) + Math.floor(Math.random() * 400);
       if (onRetry) onRetry({ err, attempt: i + 1, wait, label });
-      await sleep(wait);
+      await sleep(wait, { signal });
       delay *= 2;
     }
   }

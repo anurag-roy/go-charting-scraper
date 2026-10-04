@@ -59,6 +59,7 @@ describe('FootprintClient OHLC idxs', () => {
 
     const removes = sent.filter((m) => m.action === 'remove');
     assert.equal(removes.length, 3);
+    assert.equal(client.ohlcCollector.reqInterval.size, 0);
 
     const p4 = client.requestOhlc(nifty, '5m', 30_000);
     const lastAdd = sent.filter((m) => m.action === 'add').at(-1);

@@ -14,6 +14,7 @@ import { sampleInstruments } from './collect.js';
 import { writeStatus } from './log.js';
 import { interruptibleSleep } from './util.js';
 import { buildWsUrl } from './cognito.js';
+import { redactText } from './redact.js';
 
 export class Supervisor {
   constructor({
@@ -25,6 +26,7 @@ export class Supervisor {
     auth,
     client,
     now = () => Date.now(),
+    abortController = new AbortController(),
   }) {
     this.cfg = cfg;
     this.log = log;
@@ -34,8 +36,9 @@ export class Supervisor {
     this.auth = auth;
     this.client = client;
     this.now = now;
+    this.abortController = abortController;
 
-    this.stopping = false;
+    this.stopping = abortController.signal.aborted;
     this.liveConfig = null;
     this.liveFingerprint = '';
     this.liveInstruments = [];
@@ -44,46 +47,60 @@ export class Supervisor {
     this.nextSampleAt = 0;
     this.lastError = null;
     this.lastSampleAt = null;
+    this.lastAttemptAt = null;
     this.lastConfigAt = null;
     this.wsBackoffMs = 1000;
     this.wsBackoffUntil = 0;
-    this.wakeSample = [];
-    this.wakeConfig = [];
+    this.sampleRetryAt = 0;
+    this.sampleBackoffMs = 1000;
+    this.wakeSample = new Set();
+    this.wakeConfig = new Set();
     this.loops = [];
     this._queue = Promise.resolve();
   }
 
   #withLock(fn) {
-    const run = this._queue.then(fn, fn);
+    const execute = () => {
+      this.abortController.signal.throwIfAborted();
+      return fn();
+    };
+    const run = this._queue.then(execute, execute);
     this._queue = run.then(() => {}, () => {});
     return run;
   }
 
   stop() {
     this.stopping = true;
+    this.abortController.abort();
     this.#wakeAll();
+    this.client?.stop?.();
   }
 
   #wakeAll() {
     for (const fn of [...this.wakeSample, ...this.wakeConfig]) {
       try { fn(); } catch { /* ignore */ }
     }
-    this.wakeSample = [];
-    this.wakeConfig = [];
+    this.wakeSample.clear();
+    this.wakeConfig.clear();
   }
 
   #wakeSampleLoop() {
     for (const fn of this.wakeSample) {
       try { fn(); } catch { /* ignore */ }
     }
-    this.wakeSample = [];
+    this.wakeSample.clear();
   }
 
   async #sleep(ms, bucket) {
-    await interruptibleSleep(ms, {
-      isStopped: () => this.stopping,
-      onRegister: (cancel) => bucket.push(cancel),
-    });
+    let cancel;
+    try {
+      await interruptibleSleep(ms, {
+        isStopped: () => this.stopping,
+        onRegister: (fn) => { cancel = fn; bucket.add(fn); },
+      });
+    } finally {
+      bucket.delete(cancel);
+    }
   }
 
   secrets() {
@@ -106,7 +123,11 @@ export class Supervisor {
       })),
       lastConfigAt: this.lastConfigAt,
       lastSampleAt: this.lastSampleAt,
+      lastAttemptAt: this.lastAttemptAt,
       lastError: this.lastError,
+      state: this.stopping ? 'stopped' : this.lastError ? 'degraded'
+        : !this.liveConfig ? 'starting' : this.#dueInstruments(this.now()).length ? 'monitoring' : 'idle',
+      retryAt: this.sampleRetryAt ? new Date(this.sampleRetryAt).toISOString() : null,
       ws: this.client?.isOpen?.() ? 'open' : 'closed',
       ...extra,
     };
@@ -127,17 +148,24 @@ export class Supervisor {
       this.#configLoop(),
       this.#sampleLoop(),
     ];
-    await Promise.all(this.loops);
-    await this.#shutdown();
+    try { await Promise.all(this.loops); } finally {
+      this.stop();
+      await Promise.allSettled(this.loops);
+      await this.#shutdown();
+    }
   }
 
   async runOnce() {
-    await this.refreshConfig();
-    if (!isUsableConfig(this.liveConfig)) {
-      throw new Error('config sheet is missing email, password, or instruments with candle timeframes');
+    try {
+      await this.refreshConfig();
+      if (!isUsableConfig(this.liveConfig)) {
+        throw new Error('config sheet is missing email, password, or instruments with candle timeframes');
+      }
+      await this.sampleDue(true);
+    } finally {
+      this.stop();
+      await this.#shutdown();
     }
-    await this.sampleDue(true);
-    await this.#shutdown();
   }
 
   async #configLoop() {
@@ -145,7 +173,8 @@ export class Supervisor {
       try {
         await this.refreshConfig();
       } catch (err) {
-        this.lastError = { at: new Date().toISOString(), message: String(err?.message || err) };
+        if (this.stopping) break;
+        this.lastError = { at: new Date().toISOString(), message: redactText(err?.message || err, this.secrets()) };
         this.log.error('config poll failed; keeping last good config', err);
         this.#status();
       }
@@ -160,7 +189,7 @@ export class Supervisor {
           await this.sampleDue(false);
         }
       } catch (err) {
-        this.lastError = { at: new Date().toISOString(), message: String(err?.message || err) };
+        if (this.stopping) break;
         this.log.error('sample loop failed', err);
         this.#status();
       }
@@ -173,7 +202,7 @@ export class Supervisor {
     const nowMs = this.now();
     const due = this.#dueInstruments(nowMs);
     if (due.length) {
-      return Math.max(0, this.nextSampleAt - nowMs);
+      return Math.max(0, Math.max(this.nextSampleAt, this.sampleRetryAt, this.wsBackoffUntil) - nowMs);
     }
     const nextOpen = earliestOpenMs(this.liveInstruments, nowMs);
     const untilOpen = Math.max(5_000, nextOpen - nowMs);
@@ -296,6 +325,8 @@ export class Supervisor {
       intervalNextAt: new Map(),
     });
     this.nextSampleAt = 0;
+    this.sampleRetryAt = 0;
+    this.sampleBackoffMs = 1000;
     this.#wakeSampleLoop();
   }
 
@@ -324,6 +355,7 @@ export class Supervisor {
     for (const inst of updated) {
       this.log.info('update intervals', `slot ${inst.slot}`, inst.id, instrumentIntervals(inst).join(', ') || '(none)');
       this.sink.dropInstrument(inst);
+      this.client?.dropSymbol(inst.id);
       await this.sink.ensureInstrument(inst);
       const state = this.#stateFor(inst);
       state.backfilledSessionDate = null;
@@ -358,7 +390,9 @@ export class Supervisor {
   }
 
   async sampleDue(force) {
+    let retryInstruments = [];
     return this.#withLock(async () => {
+      if (!force && this.now() < this.sampleRetryAt) return 0;
       await this.retainCurrentDay();
       const nowMs = this.now();
       const due = this.#dueInstruments(nowMs);
@@ -379,13 +413,16 @@ export class Supervisor {
         this.#scheduleNextSample(nowMs);
         return 0;
       }
+      retryInstruments = planned.map((d) => d.instrument);
 
-      await this.auth.ensure(this.liveConfig.email, this.liveConfig.password);
+      const authResult = await this.auth.ensure(this.liveConfig.email, this.liveConfig.password);
+      if (authResult.changed && this.client?.isOpen?.()) await this.#reconnectWs('auth changed');
 
       await this.#ensureWs();
 
       this.sampleN += 1;
       const sampled_at_utc = new Date(nowMs).toISOString();
+      this.lastAttemptAt = sampled_at_utc;
       const sampled_at_ist = formatIst(new Date(nowMs));
       const samplePlan = planned.map((d) => {
         const intervals = intervalsBySlot.get(this.#stateKey(d.instrument));
@@ -426,21 +463,40 @@ export class Supervisor {
         const item = planned.find((d) => d.instrument.id === summary.id);
         if (!item) continue;
         const schedule = this.#stateFor(item.instrument).intervalNextAt;
-        if (Number.isFinite(summary.nextFetchAt)) schedule.set(summary.interval, summary.nextFetchAt);
+        if (summary.ok && Number.isFinite(summary.nextFetchAt)) schedule.set(summary.interval, summary.nextFetchAt);
         else schedule.delete(summary.interval);
       }
       for (const d of planned) {
         const state = this.#stateFor(d.instrument);
-        state.backfilledSessionDate = d.work.persistDate;
+        if (summaries.filter((s) => s.id === d.instrument.id).every((s) => s.ok)) {
+          state.backfilledSessionDate = d.work.persistDate;
+        }
         this.instrumentState.set(this.#stateKey(d.instrument), state);
+      }
+      const failures = summaries.filter((s) => !s.ok);
+      if (failures.length) {
+        retryInstruments = planned.filter((d) => failures.some((s) => s.id === d.instrument.id)).map((d) => d.instrument);
+        this.#status({ lastWrote: wrote });
+        throw new Error(`Data unavailable: ${failures.map((s) => `${s.id} ${s.interval}: ${s.error}`).join('; ')}`);
       }
       this.lastSampleAt = sampled_at_utc;
       this.lastError = null;
+      this.sampleRetryAt = 0;
+      this.sampleBackoffMs = 1000;
       this.#scheduleNextSample(nowMs);
       this.wsBackoffMs = 1000;
       this.log.info(`wrote ${wrote} new closed-candle row(s)`);
       this.#status({ lastWrote: wrote });
       return wrote;
+    }).catch((err) => {
+      if (!this.stopping) {
+        for (const inst of retryInstruments) this.#stateFor(inst).backfilledSessionDate = null;
+        this.lastError = { at: new Date(this.now()).toISOString(), message: redactText(err?.message || err, this.secrets()) };
+        this.sampleRetryAt = this.now() + this.sampleBackoffMs;
+        this.sampleBackoffMs = Math.min(this.sampleBackoffMs * 2, 60_000);
+        this.#status();
+      }
+      throw err;
     });
   }
 

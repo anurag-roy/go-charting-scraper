@@ -465,7 +465,7 @@ describe('Supervisor instrument hot-swap', () => {
         ohlcCollector: { getBars() { return []; } },
         async requestInterval() {
           nowMs += 6_200;
-          return { ok: false, candles: [], error: 'test' };
+          return { ok: true, candles: [{ date: '2026-08-17T10:00:00+05:30' }] };
         },
         async requestOhlc() { return { ok: true, bars: [] }; },
       },
@@ -477,5 +477,91 @@ describe('Supervisor instrument hot-swap', () => {
     await supervisor.sampleDue(true);
 
     assert.equal(supervisor.nextSampleAt, startedAt + 10_000);
+  });
+});
+
+describe('Supervisor failure recovery', () => {
+  function fixture({ afterClose = false } = {}) {
+    let nowMs = Date.parse(afterClose ? '2026-08-17T16:00:00+05:30' : '2026-08-17T10:00:00+05:30');
+    let failed = true;
+    let requests = 0;
+    const x = inst('NSE:FUTURE:NIFTY-I', ['2m']);
+    const supervisor = new Supervisor({
+      cfg: baseCfg(), log: silentLog(), auth: mockAuth(),
+      configSheet: { read: async () => ({}) },
+      sink: {
+        async ensureStaticTabs() {}, async ensureInstrument() {},
+        dropInstrument() {}, async retainSession() { return 0; },
+        async writeRows(rows) { return rows.length; },
+      },
+      client: {
+        isOpen: () => true, ws: { readyState: 1 }, dropSymbol() {},
+        async connect() {}, async disconnect() {},
+        ohlcCollector: { getBars: () => [] },
+        async requestInterval() {
+          requests += 1;
+          return failed ? { ok: false, candles: [], error: 'network timeout' }
+            : { ok: true, candles: [{ date: '2026-08-17T09:15:00+05:30' }] };
+        },
+        async requestOhlc() {
+          return { ok: true, bars: [{ time: '2026-08-17T09:15:00+05:30', open: 1, close: 1 }] };
+        },
+      }, now: () => nowMs,
+    });
+    supervisor.liveConfig = { email: 'a@b.c', password: 'pw' };
+    return {
+      supervisor, x, get requests() { return requests; },
+      advance(ms) { nowMs += ms; }, recover() { failed = false; },
+    };
+  }
+
+  it('backs off failed data responses without claiming success, then recovers an after-hours backfill', async () => {
+    const f = fixture({ afterClose: true });
+    await f.supervisor.reconcile([f.x]);
+    await assert.rejects(f.supervisor.sampleDue(false), /network timeout/);
+    assert.equal(f.supervisor.lastSampleAt, null);
+    assert.ok(f.supervisor.lastAttemptAt);
+    assert.equal(f.supervisor.instrumentState.get(1).backfilledSessionDate, null);
+    assert.equal(await f.supervisor.sampleDue(false), 0);
+    assert.equal(f.requests, 1);
+    f.advance(1000);
+    await assert.rejects(f.supervisor.sampleDue(false), /network timeout/);
+    f.advance(1999);
+    assert.equal(await f.supervisor.sampleDue(false), 0);
+    assert.equal(f.requests, 2);
+    f.advance(1);
+    f.recover();
+    assert.ok(await f.supervisor.sampleDue(false) > 0);
+    assert.equal(f.supervisor.lastError, null);
+    assert.equal(f.supervisor.sampleRetryAt, 0);
+    assert.equal(f.supervisor.instrumentState.get(1).backfilledSessionDate, '2026-08-17');
+  });
+
+  it('keeps a previously backfilled session eligible after a later write fails', async () => {
+    const f = fixture();
+    f.recover();
+    await f.supervisor.reconcile([f.x]);
+    await f.supervisor.sampleDue(true);
+    const lastGood = f.supervisor.lastSampleAt;
+    f.supervisor.sink.writeRows = async () => { throw new Error('Sheet write failed'); };
+    f.advance(60_000);
+    await assert.rejects(f.supervisor.sampleDue(true), /Sheet write failed/);
+    assert.equal(f.supervisor.lastSampleAt, lastGood);
+    assert.equal(f.supervisor.instrumentState.get(1).backfilledSessionDate, null);
+  });
+
+  it('removes completed sleep callbacks during prolonged idling and wakes promptly on stop', async () => {
+    const f = fixture();
+    f.supervisor.cfg.configPollMs = 1;
+    // No live instruments, so this exercises the actual config/sleep loop only.
+    f.supervisor.refreshConfig = async () => {};
+    const running = f.supervisor.run();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(f.supervisor.wakeConfig.size <= 1);
+    assert.ok(f.supervisor.wakeSample.size <= 1);
+    f.supervisor.stop();
+    await running;
+    assert.equal(f.supervisor.wakeConfig.size, 0);
+    assert.equal(f.supervisor.wakeSample.size, 0);
   });
 });

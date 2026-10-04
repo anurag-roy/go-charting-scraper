@@ -171,7 +171,7 @@ export async function sampleInstruments({
       const closed = closedRowsForInterval({
         instrument,
         interval,
-        candles: fp?.candles || [],
+        candles: fp?.ok ? (fp.candles || []) : [],
         ohlcBars,
         nowMs,
         sessionOpts,
@@ -185,12 +185,14 @@ export async function sampleInstruments({
       summaries.push({
         id: instrument.id,
         interval,
+        ok: Boolean(fp?.ok && ohlc?.ok && !fp.error && !ohlc.error),
         closed: closed.length,
         candles: (fp?.candles || []).length,
         ohlcBars: ohlcBars.length,
         ohlcMiss,
         nextFetchAt: fp?.ok ? nextIntervalFetchAt(fp.candles, interval, sessionOpts) : null,
-        error: fp?.ok ? '' : (fp?.error || ''),
+        error: [fp?.ok && !fp.error ? '' : (fp?.error || 'no footprint candles'),
+          ohlc?.ok && !ohlc.error ? '' : (ohlc?.error || 'no OHLC bars')].filter(Boolean).join('; '),
       });
     }
   }));

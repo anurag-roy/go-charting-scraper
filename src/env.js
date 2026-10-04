@@ -73,6 +73,8 @@ export function loadConfig() {
     closeGraceMs: Number(process.env.CLOSE_GRACE_MS || 2000),
     afterCloseBufferMs: Number(process.env.AFTER_CLOSE_BUFFER_MS || 60_000),
     tokenRefreshMs: Number(process.env.TOKEN_REFRESH_MS || 45 * 60_000),
+    httpTimeoutMs: Number(process.env.HTTP_TIMEOUT_MS || 20_000),
+    wsHeartbeatMs: Number(process.env.WS_HEARTBEAT_MS || 30_000),
     wsDc,
     wsTag: process.env.WS_TAG || 'go-charting-scraper',
     wsHost: process.env.WS_HOST || `wss://origin.ws.prodb.${wsDc}.gocharting.com/${wsDc}/ws`,
@@ -104,12 +106,24 @@ export function validateConfig(cfg) {
   }
   if (cfg.sheetId && cfg.googleCredentialsPath && !cfg.googleCredentialsJson && !fs.existsSync(cfg.googleCredentialsPath)) {
     errors.push(`Google credentials file not found: ${cfg.googleCredentialsPath}`);
+  } else if (cfg.googleCredentialsPath) {
+    try { fs.accessSync(cfg.googleCredentialsPath, fs.constants.R_OK); } catch {
+      errors.push(`Google credentials file is not readable: ${cfg.googleCredentialsPath}`);
+    }
   }
   if (!Number.isFinite(cfg.configPollMs) || cfg.configPollMs < 1000) {
     errors.push('CONFIG_POLL_MS must be at least 1000');
   }
   if (!Number.isFinite(cfg.sampleMs) || cfg.sampleMs < 1000) {
     errors.push('SAMPLE_MS must be at least 1000');
+  }
+  for (const [name, value] of [
+    ['HTTP_TIMEOUT_MS', cfg.httpTimeoutMs ?? 20_000],
+    ['WS_HEARTBEAT_MS', cfg.wsHeartbeatMs ?? 30_000],
+  ]) {
+    if (!Number.isInteger(value) || value < 1000 || value > 300_000) {
+      errors.push(`${name} must be an integer between 1000 and 300000`);
+    }
   }
   return errors;
 }

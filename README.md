@@ -5,6 +5,9 @@ timeframes from a Google Sheet, scrapes **closed** footprint candles, and
 writes them back into that same spreadsheet. The process is meant to run
 unattended on a VPS.
 
+Ubuntu VPS setup, including running alongside the TradingView scraper:
+[`SETUP.md`](SETUP.md).
+
 Handing this to a client on a **Windows laptop** that is powered on each
 morning (not left on 24×7): [`WINDOWS.md`](WINDOWS.md).
 
@@ -110,10 +113,22 @@ Errors go to [`logs/error.log`](logs/README.md) (redacted) and stdout.
 [`logs/status.json`](logs/README.md) is a small heartbeat for the VPS.
 
 A systemd unit is in [`deploy/gocharting-scraper.service`](deploy/gocharting-scraper.service).
-Clone, Google Sheet setup, first run, and VPS/systemd/Docker deploy are in
-[`INSTRUCTIONS.md`](INSTRUCTIONS.md). Handing the project to a client on a
+The Ubuntu deployment guide is [`SETUP.md`](SETUP.md). Config, candle columns,
+and Docker instructions are in [`INSTRUCTIONS.md`](INSTRUCTIONS.md). Handing the project to a client on a
 Windows PC that is not on 24×7: [`WINDOWS.md`](WINDOWS.md) (double-click
 `start.bat` each morning).
+
+HTTP requests have a 20-second deadline and cancel on shutdown. The WebSocket
+checks liveness every 30 seconds and reconnects after a missed pong or three
+unanswered data requests. Failed samples wait 1, 2, 4, … up to 60 seconds
+before retrying and keep their backfill eligible for recovery. Completed sleep
+callbacks and OHLC request metadata are removed.
+
+The scraper reserves one loopback port per spreadsheet to prevent simultaneous
+writers in the same host network namespace, including one-shot runs and other
+checkouts. The OS releases the guard after exit or a crash. It cannot prevent a
+second writer on another computer or in a container with separate networking;
+stop the laptop copy before moving to the VPS.
 
 ## Protocol notes
 

@@ -14,7 +14,9 @@ export function jwtExpMs(token) {
   }
 }
 
-export async function cognitoInitiateAuth({ username, password, refreshToken, fetchImpl } = {}) {
+export async function cognitoInitiateAuth({ username, password, refreshToken, fetchImpl, signal, timeoutMs = 20_000 } = {}) {
+  signal?.throwIfAborted();
+  const deadline = AbortSignal.timeout(timeoutMs);
   const fetchFn = fetchImpl || fetch;
   const body = refreshToken
     ? {
@@ -37,6 +39,7 @@ export async function cognitoInitiateAuth({ username, password, refreshToken, fe
       'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     },
     body: JSON.stringify(body),
+    signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
   });
   const text = await res.text();
   let data;
@@ -66,10 +69,12 @@ export function buildWsUrl(wsHost, idToken, tag) {
 }
 
 export class AuthSession {
-  constructor({ log, cognito = cognitoInitiateAuth, tokenRefreshMs = 45 * 60_000 } = {}) {
+  constructor({ log, cognito = cognitoInitiateAuth, tokenRefreshMs = 45 * 60_000, signal, timeoutMs = 20_000 } = {}) {
     this.log = log;
     this.cognito = cognito;
     this.tokenRefreshMs = tokenRefreshMs;
+    this.signal = signal;
+    this.timeoutMs = timeoutMs;
     this.email = '';
     this.password = '';
     this.tokens = null;
@@ -88,7 +93,7 @@ export class AuthSession {
   }
 
   async login(email, password) {
-    const next = await this.cognito({ username: email, password });
+    const next = await this.cognito({ username: email, password, signal: this.signal, timeoutMs: this.timeoutMs });
     this.email = email;
     this.password = password;
     this.tokens = next;
@@ -97,20 +102,22 @@ export class AuthSession {
   }
 
   async refresh() {
+    this.signal?.throwIfAborted();
     if (!this.tokens?.refreshToken && !(this.email && this.password)) {
       throw new Error('no credentials to refresh');
     }
     let next;
     try {
       if (this.tokens?.refreshToken) {
-        next = await this.cognito({ refreshToken: this.tokens.refreshToken });
+        next = await this.cognito({ refreshToken: this.tokens.refreshToken, signal: this.signal, timeoutMs: this.timeoutMs });
       } else {
-        next = await this.cognito({ username: this.email, password: this.password });
+        next = await this.cognito({ username: this.email, password: this.password, signal: this.signal, timeoutMs: this.timeoutMs });
       }
     } catch (err) {
+      this.signal?.throwIfAborted();
       if (this.email && this.password) {
         this.log?.warn('refresh token failed; logging in again');
-        next = await this.cognito({ username: this.email, password: this.password });
+        next = await this.cognito({ username: this.email, password: this.password, signal: this.signal, timeoutMs: this.timeoutMs });
       } else {
         throw err;
       }
@@ -125,12 +132,14 @@ export class AuthSession {
    * on failure the previous working session is kept.
    */
   async ensure(email, password, { force = false } = {}) {
+    this.signal?.throwIfAborted();
     const credsChanged = email !== this.email || password !== this.password;
     if (credsChanged && email && password) {
       try {
         await this.login(email, password);
         return { changed: true, tokens: this.tokens };
       } catch (err) {
+        this.signal?.throwIfAborted();
         if (this.tokens) {
           this.log?.error('new GoCharting credentials failed; keeping previous session', err);
           return { changed: false, tokens: this.tokens, error: err };
