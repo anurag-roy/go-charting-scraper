@@ -8,7 +8,7 @@ import {
   reconcileInstruments,
 } from './instruments.js';
 import { sheetTabName } from './columns.js';
-import { earliestOpenMs, hoursForExchange, workForInstrument } from './market.js';
+import { earliestOpenMs, sessionOptsFor, workForInstrument } from './market.js';
 import { formatIst, keepSheetDate, sessionDatesFor } from './session.js';
 import { sampleInstruments } from './collect.js';
 import { writeStatus } from './log.js';
@@ -377,7 +377,7 @@ export class Supervisor {
     const nowMs = this.now();
     const dropped = await Promise.all(this.liveInstruments.map(async (inst) => {
       const state = this.#stateFor(inst);
-      const hours = hoursForExchange(inst.exchange, nowMs);
+      const hours = sessionOptsFor(inst.exchange, nowMs);
       const dateStr = keepSheetDate(nowMs, hours, { lastWorkingDay: this.cfg.lastWorkingDay });
       if (state.retainedDate === dateStr) return 0;
       const n = await this.sink.retainSession(inst, dateStr);

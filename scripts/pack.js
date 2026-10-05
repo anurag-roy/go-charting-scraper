@@ -1,7 +1,7 @@
 /**
  * Bundle the `npm start` graph (no tests) with esbuild, then zip a runnable
  * snapshot: one JS file plus package.json, package-lock.json, launchers,
- * proto schemas, and `.env` / `google-service-account.json` when they exist
+ * proto schemas, holiday calendar/updater, and `.env` / `google-service-account.json` when they exist
  * on this machine.
  *
  * Usage: npm run pack
@@ -163,6 +163,18 @@ if (leakedTests.length) {
 
 copyDir(path.join(root, 'src', 'proto'), path.join(staging, 'proto'));
 fs.unlinkSync(path.join(staging, 'proto', 'README.md'));
+copyFile(path.join(root, '.data', 'nse_holidays.csv'), path.join(staging, '.data', 'nse_holidays.csv'));
+await esbuild.build({
+  absWorkingDir: root,
+  entryPoints: [path.join(root, 'scripts', 'update-holidays.js')],
+  outfile: path.join(staging, 'update-holidays.js'),
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  packages: 'external',
+  legalComments: 'none',
+  logLevel: 'info',
+});
 
 const distPkg = {
   name: pkg.name,
@@ -173,6 +185,7 @@ const distPkg = {
   scripts: {
     start: 'node index.js',
     once: 'ONCE=1 node index.js',
+    'holidays:update': 'node update-holidays.js',
   },
   engines: pkg.engines,
   dependencies: pkg.dependencies,

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { hoursForExchange, workForInstrument } from './market.js';
+import { anyLive, earliestOpenMs, hoursForExchange, isBeforeAnyOpen, nextOpenMs, workForInstrument } from './market.js';
 import { isCandleClosed, persistSessionDate } from './session.js';
 
 const NSE = { exchange: 'NSE', segment: 'FUTURE', symbol: 'NIFTY-I', id: 'NSE:FUTURE:NIFTY-I' };
@@ -65,6 +65,37 @@ describe('workForInstrument', () => {
     assert.equal(workForInstrument(NSE, mondayMorning, {}).action, 'idle');
   });
 
+  it('idles on an NSE holiday, including the close buffer and after-hours startup', () => {
+    for (const time of ['08:00:00', '10:00:00', '15:40:30', '16:00:00']) {
+      const now = Date.parse(`2026-10-02T${time}+05:30`);
+      for (const exchange of ['NSE', 'BSE']) {
+        const work = workForInstrument({ ...NSE, exchange }, now, {});
+        assert.equal(work.action, 'idle');
+        assert.equal(work.persistDate, '2026-10-01');
+      }
+      assert.equal(anyLive([NSE], now), false);
+      assert.equal(isBeforeAnyOpen([NSE], now), true);
+    }
+  });
+
+  it('keeps MCX active on an NSE holiday and propagates its calendar to candle filtering', () => {
+    const now = Date.parse('2026-10-02T10:00:00+05:30');
+    const work = workForInstrument(MCX, now, {});
+    assert.equal(work.action, 'sample');
+    assert.equal(work.persistDate, '2026-10-02');
+    assert.equal(work.hours.exchange, 'MCX');
+    assert.equal(anyLive([NSE, MCX], now), true);
+    assert.equal(isBeforeAnyOpen([NSE, MCX], now), false);
+  });
+
+  it('uses the previous trading session for an explicit holiday debug backfill', () => {
+    const now = Date.parse('2026-11-09T10:00:00+05:30');
+    const work = workForInstrument(NSE, now, {}, { lastWorkingDay: true });
+    assert.equal(work.action, 'backfill');
+    assert.equal(work.persistDate, '2026-11-06');
+    assert.equal(workForInstrument(NSE, now, {}).action, 'idle');
+  });
+
   it('backfills the last working day overnight when LAST_WORKING_DAY is set', () => {
     const extra = { lastWorkingDay: true };
     const twoAm = Date.parse('2026-08-18T02:00:00+05:30');
@@ -83,6 +114,27 @@ describe('workForInstrument', () => {
 
     const live = Date.parse('2026-08-17T10:00:00+05:30');
     assert.equal(workForInstrument(NSE, live, {}, extra).action, 'sample');
+  });
+});
+
+describe('next trading-day open', () => {
+  it('skips Friday holiday plus weekend and Monday holiday after a weekend', () => {
+    assert.equal(nextOpenMs('NSE', Date.parse('2026-10-02T10:00:00+05:30')), Date.parse('2026-10-05T09:15:00+05:30'));
+    assert.equal(nextOpenMs('BSE', Date.parse('2026-11-07T12:00:00+05:30')), Date.parse('2026-11-10T09:15:00+05:30'));
+    assert.equal(nextOpenMs('NSE', Date.parse('2027-04-13T16:00:00+05:30')), Date.parse('2027-04-16T09:15:00+05:30'));
+  });
+
+  it('resumes at opening and honours IST dates across the UTC day boundary', () => {
+    const before = Date.parse('2026-10-01T20:00:00Z'); // 02-Oct 01:30 IST, a holiday
+    assert.equal(nextOpenMs('NSE', before), Date.parse('2026-10-05T09:15:00+05:30'));
+    const open = Date.parse('2026-10-05T09:15:00+05:30');
+    assert.equal(nextOpenMs('NSE', open), open);
+    assert.equal(workForInstrument(NSE, open, {}).action, 'sample');
+  });
+
+  it('chooses MCX when NSE/BSE are closed', () => {
+    const now = Date.parse('2026-10-02T08:30:00+05:30');
+    assert.equal(earliestOpenMs([NSE, MCX], now), Date.parse('2026-10-02T09:00:00+05:30'));
   });
 });
 

@@ -9,6 +9,7 @@ import { FootprintClient, loadProtos } from './gocharting.js';
 import { Supervisor } from './supervisor.js';
 import { istNow } from './session.js';
 import { acquireInstanceGuard } from './instance-guard.js';
+import { getNseHolidays } from './calendar.js';
 
 function isMain() {
   const entry = process.argv[1] ? path.resolve(process.argv[1]) : '';
@@ -70,6 +71,8 @@ export async function main() {
   process.on('uncaughtException', onException);
 
   try {
+    const holidayDates = getNseHolidays();
+    log.info('NSE/BSE holiday calendar loaded', { dates: holidayDates.size, years: [...new Set([...holidayDates].map((date) => date.slice(0, 4)))] });
     releaseGuard = await acquireInstanceGuard(cfg.sheetId);
     cfg.signal.throwIfAborted();
     const sheetsApi = await createSheetsApi(cfg);

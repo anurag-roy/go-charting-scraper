@@ -4,6 +4,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY src ./src
+COPY .data ./.data
+COPY scripts/update-holidays.js ./scripts/update-holidays.js
 COPY logs ./logs
 
 ENV NODE_ENV=production

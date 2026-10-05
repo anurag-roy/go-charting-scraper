@@ -73,8 +73,9 @@ that tab.
 
 Default behaviour: run forever. While an exchange is in session, the scheduler
 checks about every **15 seconds**, but only requests a timeframe when its current
-candle can have closed. Overnight and on weekends the WebSocket is closed; the
-process stays up and keeps polling the `config` tab.
+candle can have closed. Overnight, on weekends, and on NSE/BSE holidays the
+WebSocket is closed when no other exchange is active; the process stays up
+and keeps polling the `config` tab.
 
 The live path uses outbound HTTPS + WSS; it needs no Chromium, Xvfb, or display.
 Use Node 24 on the VPS, following [`SETUP.md`](SETUP.md).
@@ -288,7 +289,7 @@ backfill already-closed candles for today’s session (if the market is open
 or already closed today), then exit. Use this as a smoke test before systemd.
 
 After midnight / before the next open, `ONCE=1` alone idles (sheets keep
-only the IST calendar day). To pull the last weekday session for testing:
+only the IST calendar day). To pull the last trading session for testing:
 
 ```bash
 LAST_WORKING_DAY=1 ONCE=1 npm start
@@ -355,7 +356,7 @@ spreadsheet id are required.
 | `WS_TAG` | `go-charting-scraper` | `tag=` query param on the WebSocket URL |
 | `WS_HOST` | derived from `WS_DC` | Full `wss://…` override |
 | `ONCE` | unset / false | `1` → one sample then exit |
-| `LAST_WORKING_DAY` | unset / false | `1` → keep and backfill the last weekday session (overnight / weekend testing). Leave unset in production. |
+| `LAST_WORKING_DAY` | unset / false | `1` → keep and backfill the last trading session, skipping weekends and applicable holidays (off-hours testing). Leave unset in production. |
 | `WRITE_CSV` | unset / false | Also append a wide debug CSV |
 | `CSV_PATH` | `logs/maxvol.csv` | CSV destination |
 | `ERROR_LOG_PATH` | `logs/error.log` | Rotating error log |
@@ -413,18 +414,31 @@ contracts.
 NSE last bars: **5m 15:35**, **3m 15:39**, **2m 15:39**. A 2-minute last bar
 may be shorter than 2 minutes (NSE session is 385 minutes).
 
-The process does **not** exit at 15:40 or on weekends:
+The process does **not** exit at 15:40, on weekends, or on holidays:
 
 - During session: sample ~every 15s; keep the WebSocket open.
 - Shortly after close: one more sample to catch the last bars, then backfill
   is marked done.
-- Overnight / weekend: close the WebSocket, keep polling `config` every 5s,
-  reconnect at the next weekday open. Previous-day sheet rows are cleared
+- Overnight / weekend / NSE-BSE holiday: close the WebSocket when no instrument
+  has an active session, keep polling `config` every 5s, and reconnect at the
+  next trading-day open. Previous-day sheet rows are cleared
   when the IST calendar date changes.
 - Process start after hours on a **trading day**: backfill that same day’s
-  session once, then idle. Previous weekdays are not backfilled.
+  session once, then idle. Previous trading days are not backfilled.
 
-Empty `closed=0` on a holiday is expected.
+NSE/BSE holidays come from the local `.data/nse_holidays.csv`, copied from
+[all-option-chain](https://github.com/anurag-roy/all-option-chain/blob/main/.data/nse_holidays.csv).
+Normal operation makes no NSE/BSE market-data requests on those dates, including
+when started after close. MCX uses weekends and its existing hours, without
+applying the NSE holiday list. `LAST_WORKING_DAY=1` explicitly allows a debug
+backfill of the previous trading session even on a closed day.
+
+After updating the source, run `npm run holidays:update` and restart the
+process to use the refreshed copy. Downloads are validated before replacement;
+a failed update preserves the existing file. The calendar is not fetched at
+runtime. Dates in years absent from the CSV are treated as weekdays/weekends
+only, so refresh the file before a new year's sessions. The list represents
+full-day closures; special trading sessions require separate scheduling changes.
 
 ---
 
@@ -541,7 +555,7 @@ The `ubuntu` service user must be able to write `logs/`; see [`SETUP.md`](SETUP.
 | `cognito auth failed` / `NotAuthorizedException` | Bad sheet password | Confirm the `config` email/password. Cognito does not open a login UI. |
 | `cognito extra challenge` | MFA | Only `USER_PASSWORD_AUTH` with no challenge is supported. |
 | `ws unexpected HTTP 401` / connect timeout | JWT rejected or WSS blocked | Egress to `origin.ws.prodb.blr1.gocharting.com`. Watch journal for `connecting websocket`. |
-| `closed=0` / `no candles` | Holiday, wrong symbol, or before first bar | Confirm the instrument string in the GoCharting UI. After hours **today**, a backfill of today’s session is expected; previous weekdays are not rewritten. |
+| `closed=0` / `no candles` | Wrong symbol, before first bar, or a closure missing from the local calendar | Confirm the instrument string in the GoCharting UI and refresh the holiday CSV. Listed NSE/BSE holidays are skipped. After hours on a trading day, a backfill of that day's session is expected; previous trading days are not rewritten. |
 | No new NSE rows after 15:40 | Last bars already flushed | Wait until 15:40 + `CLOSE_GRACE_MS`. MCX may still be live. |
 | Duplicate worry on restart | — | Keys are reloaded from each tab; a second `ONCE=1` should write 0. |
 | Static tabs `1A`–`6C` missing / not writable | Service account cannot write | Re-share the spreadsheet as Editor. `journalctl` / `logs/error.log`. |

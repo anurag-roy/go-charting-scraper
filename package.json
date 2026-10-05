@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/index.js",
     "once": "ONCE=1 node src/index.js",
+    "holidays:update": "node scripts/update-holidays.js",
     "test": "node --test src/*.test.js",
     "pack": "node scripts/pack.js"
   },

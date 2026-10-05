@@ -2,12 +2,13 @@ import {
   formatIst,
   isAfterClose,
   isBeforeOpen,
-  isWeekendIst,
   istDateString,
+  istInstant,
   marketWindowMs,
   nowInSession,
   persistSessionDate,
 } from './session.js';
+import { isTradingDate, shiftDate } from './calendar.js';
 
 export const NSE_BSE_HOURS = { open: '09:15', close: '15:40' };
 
@@ -41,20 +42,19 @@ export function hoursForExchange(exchange, nowMs = Date.now()) {
 }
 
 export function sessionOptsFor(exchange, nowMs, extra = {}) {
-  return { ...hoursForExchange(exchange, nowMs), ...extra };
+  return { ...hoursForExchange(exchange, nowMs), exchange, ...extra };
 }
 
 export function nextOpenMs(exchange, nowMs) {
-  for (let day = 0; day < 10; day += 1) {
-    const probe = nowMs + day * 24 * 3_600_000;
-    if (isWeekendIst(probe)) continue;
-    const dateStr = istDateString(new Date(probe));
+  let dateStr = istDateString(new Date(nowMs));
+  for (;; dateStr = shiftDate(dateStr, 1)) {
+    if (!isTradingDate(dateStr, exchange)) continue;
+    const probe = istInstant(dateStr, 12, 0);
     const hours = hoursForExchange(exchange, probe);
     const { openMs, closeMs } = marketWindowMs(dateStr, hours.open, hours.close);
     if (nowMs >= openMs && nowMs < closeMs) return nowMs;
     if (openMs > nowMs) return openMs;
   }
-  return nowMs + 60 * 60_000;
 }
 
 export function earliestOpenMs(instruments, nowMs) {
@@ -71,7 +71,7 @@ export function earliestOpenMs(instruments, nowMs) {
  *
  * - `sample`: live session (or just after close, to catch the last bars)
  * - `backfill`: persist session not yet written in this process
- * - `idle`: overnight, weekend, or a previous weekday (sheets keep only today
+ * - `idle`: overnight, weekend, holiday, or a previous session (sheets keep only today
  *   unless `lastWorkingDay` is set)
  */
 export function workForInstrument(instrument, nowMs, state, {
@@ -81,18 +81,17 @@ export function workForInstrument(instrument, nowMs, state, {
 } = {}) {
   const hours = sessionOptsFor(instrument.exchange, nowMs, { graceMs });
   const persistDate = persistSessionDate(nowMs, hours);
-  const weekend = isWeekendIst(nowMs);
-  const live = !weekend && nowInSession(nowMs, hours);
+  const today = istDateString(new Date(nowMs));
+  const tradingDay = isTradingDate(today, instrument.exchange);
+  const live = nowInSession(nowMs, hours);
   let inCloseBuffer = false;
-  if (!weekend && isAfterClose(nowMs, hours)) {
-    const today = istDateString(new Date(nowMs));
+  if (tradingDay && isAfterClose(nowMs, hours)) {
     const { closeMs } = marketWindowMs(today, hours.open, hours.close);
     inCloseBuffer = nowMs < closeMs + Number(afterCloseBufferMs || 0);
   }
   if (live || inCloseBuffer) {
     return { action: 'sample', persistDate, hours };
   }
-  const today = istDateString(new Date(nowMs));
   const canBackfill = lastWorkingDay || persistDate === today;
   if (canBackfill && state?.backfilledSessionDate !== persistDate) {
     return { action: 'backfill', persistDate, hours };
@@ -106,7 +105,7 @@ export function isoNowIst(nowMs) {
 
 export function anyLive(instruments, nowMs, extra = {}) {
   return (instruments || []).some((inst) => {
-    const work = workForInstrument(inst, nowMs, { backfilledSessionDate: persistSessionDate(nowMs, hoursForExchange(inst.exchange, nowMs)) }, extra);
+    const work = workForInstrument(inst, nowMs, { backfilledSessionDate: persistSessionDate(nowMs, sessionOptsFor(inst.exchange, nowMs)) }, extra);
     return work.action === 'sample';
   });
 }
@@ -116,6 +115,6 @@ export function isBeforeAnyOpen(instruments, nowMs) {
   if (!list.length) return false;
   return list.every((inst) => {
     const hours = hoursForExchange(inst.exchange, nowMs);
-    return isWeekendIst(nowMs) || isBeforeOpen(nowMs, hours) || isAfterClose(nowMs, hours);
+    return !isTradingDate(istDateString(new Date(nowMs)), inst.exchange) || isBeforeOpen(nowMs, hours) || isAfterClose(nowMs, hours);
   });
 }

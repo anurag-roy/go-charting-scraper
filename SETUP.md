@@ -150,13 +150,14 @@ ONCE=1 /usr/local/bin/node src/index.js
 ```
 
 This is a real run: it may create tabs, clear previous-day rows, and write
-closed candles to the configured spreadsheet. During or after a weekday
+closed candles to the configured spreadsheet. During or after a trading-day
 session, expect decoded candle counts and `wrote N new closed-candle row(s)`.
 A second run should skip existing candles; it may still fill missing cells.
 Check the actual Sheet for the rows.
 
-Before market opening or on a weekend, a normal one-shot run can finish
-without fetching market data. To inspect the last weekday's data instead:
+Before market opening, on a weekend, or on an NSE/BSE holiday, a normal one-shot
+run can finish without fetching market data. To inspect the last trading
+session's data instead:
 
 ```bash
 LAST_WORKING_DAY=1 ONCE=1 /usr/local/bin/node src/index.js
@@ -244,6 +245,44 @@ changes instead of forcing a reset. Preserve `.env`, `.auth/`, and `logs/`.
 Do not run another one-shot sample while the service is active; stop the
 service first. Restart only this service after changing its `.env`; instrument
 and credential changes in the Sheet are polled automatically.
+
+## Holiday calendar updates
+
+The service reads `.data/nse_holidays.csv` at startup. This is a local copy of
+[your NSE calendar](https://github.com/anurag-roy/all-option-chain/blob/main/.data/nse_holidays.csv),
+currently covering 2024–2027. Saturdays and Sundays are always closed. NSE/BSE
+instruments also skip the CSV dates; MCX keeps its existing weekday schedule.
+The service stays active, polls the config Sheet, and resumes market-data
+collection automatically at the next trading-day open. Sheet retention still
+uses the current IST calendar day in normal operation.
+
+After adding or correcting dates in the source CSV, run these commands as
+`ubuntu` on the VPS:
+
+```bash
+cd /opt/go-charting-scraper
+/usr/local/bin/npm run holidays:update
+```
+
+If the update succeeds, reload the calendar by restarting only this service:
+
+```bash
+sudo systemctl restart gocharting-scraper.service
+sudo journalctl -u gocharting-scraper.service -n 30 --no-pager
+```
+
+Look for `NSE/BSE holiday calendar loaded` with the date count and covered
+years. The updater validates the downloaded CSV and replaces the file
+atomically; a failed download or invalid CSV leaves the old copy in place.
+Restart after a successful update. No GitHub connection is needed during
+normal operation, and calendar updates require no code change. Preserve the
+CSV's `date,holiday` header and `DD-Mmm-YYYY` dates.
+
+Refresh the local copy before trading starts in a year not yet in it. Missing
+years only have weekend protection. This calendar lists full-day closures;
+special sessions such as Muhurat trading are outside the normal schedule.
+`LAST_WORKING_DAY=1` remains a debugging override to backfill the previous
+trading session on closed days; leave it unset in production.
 
 ## Migrating the older VPS service
 

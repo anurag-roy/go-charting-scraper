@@ -1,3 +1,5 @@
+import { isTradingDate, previousTradingDate } from './calendar.js';
+
 export const TZ = 'Asia/Kolkata';
 
 function pad2(n) {
@@ -66,10 +68,11 @@ export function marketWindowMs(dateStr, open = '09:15', close = '15:40') {
   };
 }
 
-export function inSession(candleTimeIso, { open = '09:15', close = '15:40' } = {}) {
+export function inSession(candleTimeIso, { open = '09:15', close = '15:40', exchange = 'NSE' } = {}) {
   const start = Date.parse(candleTimeIso);
   if (!Number.isFinite(start)) return false;
   const dateStr = istDateString(new Date(start));
+  if (!isTradingDate(dateStr, exchange)) return false;
   const { openMs, closeMs } = marketWindowMs(dateStr, open, close);
   return start >= openMs && start < closeMs;
 }
@@ -124,42 +127,37 @@ export function isWeekendIst(nowMs) {
   return d === 'Sat' || d === 'Sun';
 }
 
-export function persistSessionDate(nowMs, { open = '09:15' } = {}) {
-  let t = nowMs;
-  for (let i = 0; i < 10; i += 1) {
-    if (isWeekendIst(t) || isBeforeOpen(t, { open })) {
-      t -= 12 * 3_600_000;
-      continue;
-    }
-    return istDateString(new Date(t));
-  }
-  return istDateString(new Date(nowMs));
+export function persistSessionDate(nowMs, { open = '09:15', exchange = 'NSE' } = {}) {
+  const today = istDateString(new Date(nowMs));
+  if (isTradingDate(today, exchange) && !isBeforeOpen(nowMs, { open })) return today;
+  return previousTradingDate(today, exchange);
 }
 
 /**
  * Date whose rows stay on the sheet.
  * Production keeps the IST calendar day. `LAST_WORKING_DAY=1` keeps the
- * persist session so overnight / weekend testing can reuse yesterday.
+ * persist session so off-hours testing can reuse the previous trading day.
  */
 export function keepSheetDate(nowMs, hours = {}, { lastWorkingDay = false } = {}) {
   if (lastWorkingDay) return persistSessionDate(nowMs, hours);
   return istDateString(new Date(nowMs));
 }
 
-export function sessionDatesFor(nowMs, { open = '09:15' } = {}) {
-  const persist = persistSessionDate(nowMs, { open });
+export function sessionDatesFor(nowMs, { open = '09:15', exchange = 'NSE' } = {}) {
+  const persist = persistSessionDate(nowMs, { open, exchange });
   const today = istDateString(new Date(nowMs));
   const yesterday = istDateString(new Date(nowMs - 12 * 3_600_000));
   const dayBefore = istDateString(new Date(nowMs - 36 * 3_600_000));
-  return [...new Set([persist, today, yesterday, dayBefore])];
+  return [...new Set([persist, today, yesterday, dayBefore])].filter((date) => isTradingDate(date, exchange));
 }
 
 export function isPersistableCandle(candleTimeIso, nowMs, {
   open = '09:15',
   close = '15:40',
+  exchange = 'NSE',
 } = {}) {
-  if (!inSession(candleTimeIso, { open, close })) return false;
+  if (!inSession(candleTimeIso, { open, close, exchange })) return false;
   const start = Date.parse(candleTimeIso);
   const candleDate = istDateString(new Date(start));
-  return candleDate === persistSessionDate(nowMs, { open });
+  return candleDate === persistSessionDate(nowMs, { open, exchange });
 }

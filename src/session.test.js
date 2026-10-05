@@ -10,6 +10,7 @@ import {
   isPersistableCandle,
   intervalMinutes,
   marketWindowMs,
+  sessionDatesFor,
 } from './session.js';
 
 const SESSION = { open: '09:15', close: '15:40', graceMs: 2000 };
@@ -70,6 +71,29 @@ describe('NSE session window', () => {
     const now = Date.parse('2026-08-14T10:00:00+05:30');
     assert.equal(isPersistableCandle('2026-08-14T09:15:00+05:30', now, SESSION), true);
     assert.equal(isPersistableCandle('2026-08-13T09:15:00+05:30', now, SESSION), false);
+  });
+
+  it('skips holidays when selecting the current or previous session', () => {
+    assert.equal(persistSessionDate(Date.parse('2026-10-02T10:00:00+05:30'), SESSION), '2026-10-01');
+    assert.equal(persistSessionDate(Date.parse('2026-10-05T09:14:59+05:30'), SESSION), '2026-10-01');
+    assert.equal(persistSessionDate(Date.parse('2026-10-05T09:15:00+05:30'), SESSION), '2026-10-05');
+    assert.equal(persistSessionDate(Date.parse('2027-04-15T16:00:00+05:30'), SESSION), '2027-04-13');
+  });
+
+  it('requests no holiday or weekend fallback dates', () => {
+    const now = Date.parse('2026-11-10T08:00:00+05:30');
+    assert.deepEqual(sessionDatesFor(now, SESSION), ['2026-11-06', '2026-11-10']);
+    assert.deepEqual(sessionDatesFor(now, { ...SESSION, exchange: 'MCX' }), ['2026-11-09', '2026-11-10']);
+  });
+
+  it('rejects holiday and weekend candles while retaining MCX weekday candles', () => {
+    const now = Date.parse('2026-10-02T10:00:00+05:30');
+    const candle = '2026-10-02T09:15:00+05:30';
+    assert.equal(inSession(candle, SESSION), false);
+    assert.equal(isPersistableCandle(candle, now, SESSION), false);
+    assert.equal(isPersistableCandle(candle, now, { ...SESSION, exchange: 'MCX' }), true);
+    assert.equal(inSession('2026-10-03T09:15:00+05:30', { ...SESSION, exchange: 'MCX' }), false);
+    assert.equal(isPersistableCandle('2026-10-01T09:15:00+05:30', now, SESSION), true);
   });
 
   it('computes a 385-minute cash session', () => {

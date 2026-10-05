@@ -33,14 +33,22 @@ WebSocket + Protobuf protocol; schemas live in [`src/proto/`](src/proto/).
    `2B`, `2C`, and so on (column C → A, D → B, E → C). Forming bars are never
    written. Each tab keeps **only the current IST day’s rows**; previous-day
    candles are deleted in the morning. Set `LAST_WORKING_DAY=1` to keep and
-   backfill the last weekday session instead (for testing after midnight).
+   backfill the last trading session instead (for testing after midnight).
 5. If you change a slot’s symbol or timeframes during the session, those same
    tabs are **overwritten** (the sheet names never change, and sheets are never
    deleted). The new symbol/timeframe is backfilled for **today’s** session
    only.
-6. Stays running overnight and on weekends. NSE/BSE are sampled 09:15–15:40
+6. Stays running overnight, on weekends, and on holidays. NSE/BSE are sampled 09:15–15:40
    IST; MCX energy-style contracts 09:00–23:30 IST (23:55 while US Eastern is
-   on daylight saving). Outside those windows the websocket is closed.
+   on daylight saving). All instruments skip Saturdays and Sundays; NSE/BSE
+   also skip dates in the local [NSE holiday CSV](.data/nse_holidays.csv).
+   Outside active sessions the websocket is closed, and collection resumes
+   at the next trading-day open. MCX retains its weekday schedule.
+
+The holiday CSV is loaded locally at startup, with no runtime download. After
+updating the [source CSV](https://github.com/anurag-roy/all-option-chain/blob/main/.data/nse_holidays.csv),
+run `npm run holidays:update` and restart the scraper. The bundled copy currently
+covers 2024–2027. See [SETUP.md](SETUP.md#holiday-calendar-updates) for VPS commands.
 
 ## Config sheet
 
@@ -100,7 +108,7 @@ cp .env.example .env   # GOOGLE_SHEET_ID + GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_
 npm ci
 npm start              # 24x7
 ONCE=1 npm start       # one config read + one sample, then exit
-LAST_WORKING_DAY=1 ONCE=1 npm start   # last weekday session (late-night testing)
+LAST_WORKING_DAY=1 ONCE=1 npm start   # last trading session (late-night testing)
 npm test
 npm run pack           # dist/go-charting-scraper-<version>.zip (no git / tests)
 ```

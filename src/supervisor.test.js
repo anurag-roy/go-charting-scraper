@@ -480,6 +480,89 @@ describe('Supervisor instrument hot-swap', () => {
   });
 });
 
+describe('Supervisor closed trading days', () => {
+  function fixture({ lastWorkingDay = false } = {}) {
+    let nowMs = Date.parse('2026-10-02T10:00:00+05:30');
+    let open = true;
+    const calls = { auth: 0, connect: 0, disconnect: 0, footprint: [], ohlc: [], rows: [] };
+    const auth = mockAuth();
+    auth.ensure = async () => { calls.auth += 1; return { changed: false }; };
+    const supervisor = new Supervisor({
+      cfg: { ...baseCfg(), lastWorkingDay }, log: silentLog(), auth,
+      configSheet: { read: async () => ({}) },
+      sink: {
+        async ensureStaticTabs() {}, async ensureInstrument() {}, dropInstrument() {},
+        async retainSession() { return 0; },
+        async writeRows(rows) { calls.rows.push(...rows); return rows.length; },
+      },
+      client: {
+        isOpen: () => open, dropSymbol() {},
+        async disconnect() { calls.disconnect += 1; open = false; },
+        async connect() { calls.connect += 1; open = true; },
+        ohlcCollector: { getBars: () => [] },
+        async requestInterval(instrument, interval, dates) {
+          calls.footprint.push({ id: instrument.id, dates });
+          return { ok: true, candles: [{ date: `${dates[0]}T09:15:00+05:30` }] };
+        },
+        async requestOhlc(instrument) { calls.ohlc.push(instrument.id); return { ok: true, bars: [] }; },
+      },
+      now: () => nowMs,
+    });
+    supervisor.liveConfig = { email: 'a@b.c', password: 'pw' };
+    return { supervisor, calls, setNow: (time) => { nowMs = Date.parse(time); } };
+  }
+
+  it('makes no data requests on a holiday/weekend, then reconnects automatically on Monday', async () => {
+    const { supervisor, calls, setNow } = fixture();
+    await supervisor.reconcile([inst('NSE:FUTURE:NIFTY-I', ['5m'])]);
+    for (const time of [
+      '2026-10-02T10:00:00+05:30', '2026-10-02T15:40:30+05:30',
+      '2026-10-02T17:00:00+05:30', '2026-10-03T10:00:00+05:30',
+      '2026-10-04T10:00:00+05:30', '2026-10-05T09:14:59+05:30',
+    ]) {
+      setNow(time);
+      assert.equal(await supervisor.sampleDue(true), 0);
+    }
+    assert.equal(calls.disconnect, 1);
+    assert.equal(calls.connect, 0);
+    assert.equal(calls.auth, 0);
+    assert.deepEqual(calls.footprint, []);
+    assert.deepEqual(calls.ohlc, []);
+    assert.deepEqual(calls.rows, []);
+    assert.equal(supervisor.lastSampleAt, null);
+
+    setNow('2026-10-05T09:20:02+05:30');
+    assert.equal(await supervisor.sampleDue(false), 1);
+    assert.equal(calls.connect, 1);
+    assert.equal(calls.rows[0].candle_time, '2026-10-05T09:15:00+05:30');
+    assert.deepEqual(calls.footprint[0].dates, ['2026-10-05']);
+  });
+
+  it('uses the previous trading session for an explicit holiday backfill', async () => {
+    const { supervisor, calls } = fixture({ lastWorkingDay: true });
+    await supervisor.reconcile([inst('NSE:FUTURE:NIFTY-I', ['5m'])]);
+    assert.equal(supervisor.instrumentState.get(1).retainedDate, '2026-10-01');
+    assert.equal(await supervisor.sampleDue(true), 1);
+    assert.equal(calls.rows[0].candle_time, '2026-10-01T09:15:00+05:30');
+    assert.equal(calls.footprint[0].dates.includes('2026-10-02'), false);
+  });
+
+  it('samples only MCX when mixed instruments run on an NSE holiday', async () => {
+    const { supervisor, calls } = fixture({ lastWorkingDay: true });
+    const nse = inst('NSE:FUTURE:NIFTY-I', ['5m'], 1);
+    const mcx = inst('MCX:FUTURE:CRUDEOIL-I', ['5m'], 2);
+    await supervisor.reconcile([nse, mcx]);
+    // Mark the optional debug backfill done; NSE remains closed while MCX is live.
+    supervisor.instrumentState.get(1).backfilledSessionDate = '2026-10-01';
+    assert.equal(supervisor.instrumentState.get(2).retainedDate, '2026-10-02');
+    assert.equal(await supervisor.sampleDue(true), 1);
+    assert.deepEqual(calls.ohlc, [mcx.id]);
+    assert.deepEqual(calls.footprint.map((call) => call.id), [mcx.id]);
+    assert.equal(calls.footprint[0].dates[0], '2026-10-02');
+    assert.equal(calls.rows[0].candle_time, '2026-10-02T09:15:00+05:30');
+  });
+});
+
 describe('Supervisor failure recovery', () => {
   function fixture({ afterClose = false } = {}) {
     let nowMs = Date.parse(afterClose ? '2026-08-17T16:00:00+05:30' : '2026-08-17T10:00:00+05:30');
